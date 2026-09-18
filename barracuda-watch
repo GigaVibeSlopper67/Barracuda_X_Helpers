@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Tiny live battery watch for the Razer Barracuda X. Usage: barracuda-watch [interval_sec]"""
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from barracuda_battery import read_state
+
+CLEAR, RESET, DIM = "\x1b[2J\x1b[H", "\x1b[0m", "\x1b[2m"
+
+
+def color(p):
+    return "\x1b[32m" if p >= 50 else "\x1b[33m" if p > 20 else "\x1b[31m"
+
+
+def bar(p, w=25):
+    n = round(p / 100 * w)
+    return "█" * n + "░" * (w - n)
+
+
+def main():
+    interval = float(sys.argv[1]) if len(sys.argv) > 1 else 5.0
+    sys.stdout.reconfigure(line_buffering=True)
+    print("starting…")
+    first = True
+    try:
+        while True:
+            if not first:
+                print(CLEAR, end="")
+            first = False
+            print(f"Razer Barracuda X — {time.strftime('%H:%M:%S')}  "
+                  f"(poll {interval:g} s, Ctrl-C to quit)")
+            try:
+                s = read_state()
+                print(f"\n  {color(s['percent'])}{s['percent']:3d} %{RESET}  "
+                      f"{bar(s['percent'])}  \x1b[36m{s['millivolts']} mV\x1b[0m  {s['status']}\n")
+                print(f"  {DIM}{s['device']} · raw: {s['raw']}{RESET}")
+            except (OSError, ValueError, FileNotFoundError) as e:
+                print(f"\n  waiting for dongle… ({e})")
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print(f"{RESET}\nbye")
+
+
+if __name__ == "__main__":
+    main()
