@@ -112,6 +112,46 @@ ff 0f 05 fe 12 04 1f 08 05 06 05 06 10 68 64 00 …
   can be higher. Don't treat 4200 mV as a range ceiling or detect "full" from a
   mV threshold; use status `0x06` as the reliable end-of-charge signal.
 
+## KDE / desktop tray integration
+
+`barracuda-tray` shows the headset battery as a system-tray icon. Qt implements
+the **StatusNotifierItem** protocol on Linux, which KDE Plasma 5/6 renders
+natively (GNOME via an extension, sway, Hyprland … also work), and it posts
+desktop notifications on state transitions: `< 20 %` low, `< 10 %` critical
+(once per discharge, re-armed when charging or above 25 %), "fully charged",
+and dongle un/re-plug. The empty-cache blob (`ff 01 00 …`, headset off) is
+treated as *unknown* and never reported as 0 %.
+
+```bash
+sudo dnf install python3-pyqt6          # Fedora; libnotify is already installed
+./barracuda-tray                        # tray icon, 30 s poll
+./barracuda-tray --interval 10 --debug  # faster poll + stdout logging
+./barracuda-tray --test-notify          # fire all notification kinds once, exit
+./barracuda-tray --selftest             # verify icon/notify logic (no hardware, no Qt)
+```
+
+Install (pick a launcher, and optionally the udev rule):
+
+```bash
+# udev: read access without openrazer (logind uaccess for the active seat user)
+sudo cp install/70-barracuda.rules /etc/udev/rules.d/
+sudo udevadm control --reload && sudo udevadm trigger
+
+# make it available on PATH (same convention as the barracuda-battery symlink)
+ln -s "$(pwd)/barracuda-tray" ~/.local/bin/barracuda-tray
+
+# launch at login, option A: XDG autostart
+cp install/barracuda-tray.desktop ~/.config/autostart/
+
+# option B: systemd user unit (auto-restart, journalctl --user -u barracuda-tray)
+cp install/barracuda-tray.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now barracuda-tray
+```
+
+Tray menu: current state (read-only), *Refresh now*, *Watch live in Konsole…*
+(runs `barracuda-watch`), *Notifications* toggle, *About*, *Quit*. A single
+click posts the current state as a transient notification.
+
 ## Sources
 
 * github.com/Modzeleczek/RazerNariBatteryLevel — Nari dongle SET/GET cycle + payload (`ff 0a 00 fd 04 12 f1 02 05`), C/libusb

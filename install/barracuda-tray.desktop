@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Barracuda X Battery Tray
+GenericName=Battery tray icon
+Comment=Razer Barracuda X headset battery in the system tray (StatusNotifierItem)
+Exec=barracuda-tray
+Icon=battery
+Terminal=false
+Categories=TrayIcon;Utility;
+X-KDE-StartupNotify=false

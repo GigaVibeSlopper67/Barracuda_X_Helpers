@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+"""
+Barracuda X battery tray icon + desktop notifications (Linux desktops).
+
+Shows the Razer Barracuda X (2.4 GHz dongle, 1532:0536/0552/0574) battery as a
+system-tray icon. On Linux Qt speaks the StatusNotifierItem protocol, which
+KDE Plasma 5/6 renders natively (GNOME via an extension, sway, Hyprland too).
+
+Polls read_state() from barracuda_battery.py (see README for the protocol).
+The pull query is benign — Synapse sends the same SET/GET every few seconds —
+so the default 30 s poll is deliberately gentle.
+
+Notifications (best-effort via notify-send / org.freedesktop.Notifications,
+deduplicated on state transitions):
+  * <20% low (normal), <10% critical — once per discharge, re-armed when
+    charging or when percent climbs back above 25
+  * "fully charged" once per charge cycle
+  * dongle unplugged / (re)connected
+The empty-cache blob (ff 01 00 …, headset off / fresh plug) is treated as
+"unknown" and is never reported as 0 %.
+
+Usage:
+  barracuda-tray                      # tray icon, 30 s poll
+  barracuda-tray --interval 10        # poll every 10 s (clamped to >= 2 s)
+  barracuda-tray --dev /dev/hidraw5   # pin the hidraw node
+  barracuda-tray --test-notify        # fire all notification kinds once, exit
+  barracuda-tray --debug              # log ticks/notifications to stdout
+  barracuda-tray --selftest           # verify icon/notify logic, no hardware/Qt
+
+Requires: PyQt6 (Fedora: sudo dnf install python3-pyqt6), libnotify (notify-send).
+"""
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from barracuda_battery import read_state
+
+DEFAULT_INTERVAL = 30.0
+LOW_PERCENT = 20
+CRITICAL_PERCENT = 10
+REARM_PERCENT = 25
+EMPTY_CACHE_PREFIX = "ff 01 00"
+
+try:
+    from PyQt6.QtCore import QProcess, QRectF, QPointF, Qt, QTimer
+    from PyQt6.QtGui import (QAction, QColor, QIcon, QPainter, QPen,
+                             QPixmap, QPolygonF)
+    from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
+    HAVE_QT = True
+except ImportError:
+    HAVE_QT = False
+
+
+# --- pure logic (no Qt), exercised by --selftest -----------------------------
+
+def state_kind(state):
+    """Classify a read_state() result: 'ok' | 'empty' | 'disconnected'."""
+    if state is None:
+        return "disconnected"
+    if state.get("raw", "").startswith(EMPTY_CACHE_PREFIX):
+        return "empty"          # dongle present, headset off / cache not filled
+    return "ok"
+
+
+def format_state_text(state):
+    """'80% (4128 mV, charging)' style summary, or a placeholder for odd states."""
+    kind = state_kind(state)
+    if kind == "disconnected":
+        return "dongle not found"
+    if kind == "empty":
+        return "headset off / state unknown"
+    return f"{state['percent']}% ({state['millivolts']} mV, {state['status']})"
+
+
+def icon_candidates(state):
+    """Theme icon names to try in order; empty list -> painted fallback."""
+    kind = state_kind(state)
+    if kind == "disconnected":
+        return ["battery-missing-symbolic", "battery-missing"]
+    if kind == "empty":
+        return ["battery-unknown-symbolic", "battery-empty-symbolic",
+                "battery-caution-symbolic"]
+    p = max(0, min(100, state["percent"]))
+    level = "100" if p == 100 else f"{p // 10 * 10:03d}"
+    if state["status"] == "charging":
+        return [f"battery-{level}-charging-symbolic", "battery-charging-symbolic"]
+    return [f"battery-{level}-symbolic", f"battery-{level}"]
+
+
+class NotifyLogic:
+    """Transition-based notification decisions. feed() -> [(title, body, urgency)]."""
+
+    def __init__(self):
+        self.kind = None
+        self.percent = None
+        self.status = None
+        self.fired = set()      # subset of {'low', 'critical', 'charged'}
+
+    def feed(self, kind, percent=None, status=None):
+        msgs = []
+        prev = self.kind
+        if kind == "ok":
+            if prev == "disconnected":
+                msgs.append(("Barracuda X connected",
+                             "Battery readings available again.", "normal"))
+            if status == "fully charged":
+                if "charged" not in self.fired:
+                    msgs.append(("Barracuda X fully charged",
+                                 "You can unplug the charger.", "normal"))
+                    self.fired.add("charged")
+            else:
+                self.fired.discard("charged")
+            if status == "charging" or (percent is not None and percent >= REARM_PERCENT):
+                self.fired.discard("low")
+                self.fired.discard("critical")
+            elif percent is not None:
+                if percent <= CRITICAL_PERCENT and "critical" not in self.fired:
+                    msgs.append(("Barracuda X battery critical",
+                                 f"{percent}% — charge it now.", "critical"))
+                    self.fired.update(("low", "critical"))
+                elif percent <= LOW_PERCENT and "low" not in self.fired:
+                    msgs.append(("Barracuda X battery low",
+                                 f"{percent}% left.", "normal"))
+                    self.fired.add("low")
+        elif kind == "disconnected" and prev == "ok":
+            msgs.append(("Barracuda X unplugged",
+                         "Dongle no longer detected.", "normal"))
+        # 'empty' (headset off / fresh plug) and transient read errors: icon only.
+        self.kind, self.percent, self.status = kind, percent, status
+        return msgs
+
+
+# --- Qt tray -----------------------------------------------------------------
+
+def paint_battery_pixmap(percent=None, charging=False):
+    """Self-contained battery icon, used when no matching theme icon exists."""
+    green, yellow, red = QColor(80, 220, 100), QColor(255, 193, 7), QColor(232, 72, 54)
+    pm = QPixmap(24, 24)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QPen(QColor(210, 210, 210), 1.5))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRoundedRect(QRectF(2.0, 5.5, 17.0, 13.0), 3.0, 3.0)      # shell
+    p.drawRoundedRect(QRectF(20.2, 10.0, 2.6, 4.0), 1.2, 1.2)      # terminal cap
+    if percent is None:                                     # unknown / empty cache
+        p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, "?")
+    else:
+        h = 11.0 * max(0, min(100, percent)) / 100.0
+        color = green if percent >= 50 else yellow if percent > LOW_PERCENT else red
+        p.setPen(QPen(Qt.PenStyle.NoPen))
+        p.setBrush(color)
+        p.drawRoundedRect(QRectF(3.6, 16.5 - h, 13.8, h), 1.5, 1.5)  # fill, bottom-anchored
+        if charging:
+            bolt = QPolygonF([QPointF(x, y) for x, y in ((13.5, 5.0), (9.0, 13.0),
+                                                         (12.0, 13.0), (10.5, 19.0),
+                                                         (15.5, 11.0), (12.5, 11.0))])
+            p.setBrush(QColor(255, 210, 60))
+            p.drawPolygon(bolt)
+    p.end()
+    return pm
+
+
+class TrayApp:
+    def __init__(self, interval, dev, debug):
+        self.dev = dev
+        self.debug = debug
+        self.interval = max(2.0, interval)
+        self.logic = NotifyLogic()
+        self.state = None
+        self.last_error = None
+
+        self.tray = QSystemTrayIcon()
+        self.tray.setToolTip("Barracuda X — starting…")
+
+        self.a_status = QAction(format_state_text(None))
+        self.a_status.setEnabled(False)
+        self.a_refresh = QAction("Refresh now")
+        self.a_refresh.triggered.connect(self.tick)
+        self.a_watch = QAction("Watch live in Konsole…")
+        self.a_watch.triggered.connect(self.open_watch)
+        self.a_notify = QAction("Notifications")
+        self.a_notify.setCheckable(True)
+        self.a_notify.setChecked(True)
+        self.a_about = QAction("About")
+        self.a_about.triggered.connect(self.show_about)
+        a_quit = QAction("Quit")
+        a_quit.triggered.connect(QApplication.quit)
+
+        self.menu = QMenu()
+        for a in (self.a_status, self.a_refresh, self.a_watch, self.a_notify,
+                  self.a_about, a_quit):
+            self.menu.addAction(a)
+            if a in (self.a_watch, self.a_about):
+                self.menu.addSeparator()
+        self.tray.setContextMenu(self.menu)
+        self.tray.activated.connect(self.on_activated)
+
+        self.timer = QTimer()
+        self.timer.setInterval(int(self.interval * 1000))
+        self.timer.timeout.connect(self.tick)
+        self.tick()
+        self.tray.show()
+        self.timer.start()
+
+    def icon_for(self, state):
+        for name in icon_candidates(state):
+            icon = QIcon.fromTheme(name)
+            if not icon.isNull():
+                return icon
+        kind = state_kind(state)
+        pm = paint_battery_pixmap(None if kind != "ok" else state["percent"],
+                                  bool(state and state["status"] == "charging"))
+        return QIcon(pm)
+
+    def update_ui(self, state, err):
+        text = format_state_text(state) if state is not None else (err or "dongle not found")
+        self.a_status.setText(f"Barracuda X — {text}")
+        self.tray.setToolTip(f"Barracuda X — {text}")
+        self.tray.setIcon(self.icon_for(state))
+
+    def tick(self):
+        state, err = None, None
+        try:
+            state = read_state(self.dev)
+        except FileNotFoundError:
+            err = "dongle not found"
+        except (OSError, ValueError) as e:
+            err = str(e)
+        self.state, self.last_error = state, err
+        self.update_ui(state, err)
+        for title, body, urgency in self.logic.feed(
+                state_kind(state),
+                state["percent"] if state else None,
+                state["status"] if state else None):
+            self.notify(title, body, urgency)
+        if self.debug:
+            detail = format_state_text(state) if state else (err or "?")
+            print(f"[{time.strftime('%H:%M:%S')}] poll: {detail}", flush=True)
+
+    def on_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger and self.state:
+            self.notify("Barracuda X", format_state_text(self.state), force=True)
+
+    def open_watch(self):
+        watch = os.path.join(os.path.dirname(os.path.realpath(__file__)), "barracuda-watch")
+        term = shutil.which("konsole") or shutil.which("x-terminal-emulator")
+        if term:
+            QProcess.startDetached(term, ["-e", watch])
+        else:
+            self.notify("Barracuda X", "No terminal found — run barracuda-watch manually.",
+                        force=True)
+
+    def show_about(self):
+        QMessageBox.about(None, "Barracuda X battery",
+                          "<b>Barracuda X battery meter</b><br>"
+                          "Reads the Razer Barracuda X dongle battery directly over HID "
+                          "(64-byte vendor feature report 0xFF, SET/GET cycle — see "
+                          "barracuda_battery.py / README.md).<br><br>"
+                          f"Poll: every {self.interval:g} s · "
+                          f"notifications: {'on' if self.a_notify.isChecked() else 'off'}")
+
+    def notify(self, title, body, urgency="normal", force=False):
+        if not force and not self.a_notify.isChecked():
+            return
+        if self.debug:
+            print(f"  [notify {urgency}] {title}: {body}", flush=True)
+        try:
+            subprocess.run(["notify-send", "-a", "Barracuda X", "-u", urgency,
+                            title, body],
+                           timeout=5, check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            if self.debug:
+                print(f"  [notify failed] {e}", flush=True)
+
+
+def run_test_notify(tray):
+    for title, body, urgency in (
+            ("Barracuda X battery low", "19% left.", "normal"),
+            ("Barracuda X battery critical", "9% — charge it now.", "critical"),
+            ("Barracuda X fully charged", "You can unplug the charger.", "normal"),
+    ):
+        tray.notify(title, body, urgency, force=True)
+
+
+def selftest():
+    """Exercise NotifyLogic + helpers with synthetic states, no hardware, no Qt."""
+    logic = NotifyLogic()
+    empty = {"percent": 0, "millivolts": 0, "status": "idle",
+             "raw": EMPTY_CACHE_PREFIX + " 00 00", "device": "/dev/hidraw0"}
+    ok = lambda p, st: ("ok", p, st)
+    tests = [
+        (None,                       []),            # startup, dongle absent
+        (empty,                      []),            # fresh plug, headset off
+        (ok(80, "charging"),         []),            # powered on (prev 'empty': silent)
+        (ok(75, "discharging"),      []),
+        (ok(19, "discharging"),      ["low"]),
+        (ok(12, "discharging"),      []),            # low already fired: dedupe
+        (ok(9, "discharging"),       ["critical"]),
+        (ok(8, "discharging"),       []),
+        (ok(55, "discharging"),      []),            # re-arms low/critical
+        (ok(19, "discharging"),      ["low"]),       # re-fired
+        (ok(90, "charging"),         []),            # re-arm
+        (ok(100, "fully charged"),   ["charged"]),
+        (ok(100, "fully charged"),   []),            # dedupe
+        (ok(60, "discharging"),      []),            # charged flag cleared
+        (ok(100, "fully charged"),   ["charged"]),   # next charge cycle
+        ("disconnected",             ["unplugged"]),
+        (empty,                      []),            # headset off: silent
+        (ok(80, "charging"),         []),            # powered on again (prev 'empty': silent)
+    ]
+    failures = 0
+    short = {"Barracuda X battery low": "low",
+             "Barracuda X battery critical": "critical",
+             "Barracuda X fully charged": "charged",
+             "Barracuda X connected": "connected",
+             "Barracuda X unplugged": "unplugged"}
+    for i, (state, want) in enumerate(tests, 1):
+        if state is None or state == "disconnected":
+            kind, pct, st = "disconnected", None, None
+        elif isinstance(state, dict):
+            kind, pct, st = state_kind(state), state["percent"], state["status"]
+        else:
+            kind, pct, st = state
+        got = [short.get(t, t) for t, _, _ in logic.feed(kind, pct, st)]
+        mark = "OK" if got == want else "FAIL"
+        if got != want:
+            failures += 1
+        print(f"  {i:2d}. {kind:12s} {str(pct):>4s} {str(st):>13s} -> {got or ['—']} {mark}")
+    for s in (None, empty, {"percent": 80, "millivolts": 4128, "status": "charging",
+                            "raw": "ff 0f 05 fe 12 04 1f 08 05"}):
+        assert icon_candidates(s), f"icon_candidates({s!r}) empty"
+    assert format_state_text(None) == "dongle not found"
+    assert format_state_text(empty) == "headset off / state unknown"
+    if failures:
+        sys.exit(f"selftest FAILED ({failures} unexpected notification set(s))")
+    print("selftest OK — icon/notify logic verified (no hardware needed)")
+
+
+def parse_args():
+    argv = sys.argv[1:]
+    interval, dev = DEFAULT_INTERVAL, None
+    try:
+        if "--interval" in argv:
+            i = argv.index("--interval")
+            interval = float(argv[i + 1])
+            del argv[i:i + 2]
+        if "--dev" in argv:
+            i = argv.index("--dev")
+            dev = argv[i + 1]
+            del argv[i:i + 2]
+    except (IndexError, ValueError):
+        sys.exit("usage: barracuda-tray [--interval SECONDS] [--dev /dev/hidrawN]"
+                 " [--test-notify] [--debug] [--selftest]")
+    return interval, dev, argv
+
+
+def main():
+    interval, dev, argv = parse_args()
+    if "--selftest" in argv:
+        return selftest()
+    debug = "--debug" in argv
+    test_notify = "--test-notify" in argv
+    if not HAVE_QT:
+        sys.exit("error: PyQt6 is required for the tray"
+                 " (Fedora: sudo dnf install python3-pyqt6).\n"
+                 "Note: '--selftest' works without Qt.")
+    app = QApplication(["Barracuda X battery"])
+    app.setApplicationName("Barracuda X battery")
+    app.setQuitOnLastWindowClosed(False)
+    tray = TrayApp(interval, dev, debug)
+    if test_notify:
+        run_test_notify(tray)
+        return 0
+    if not QSystemTrayIcon.isSystemTrayAvailable():
+        print("warning: no system tray visible yet"
+              " (Plasma panel may still be loading)", file=sys.stderr)
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

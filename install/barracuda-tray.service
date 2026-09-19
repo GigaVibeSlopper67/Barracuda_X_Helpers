@@ -1,0 +1,14 @@
+[Unit]
+Description=Barracuda X headset battery tray icon
+Comment=StatusNotifierItem tray icon + low-battery notifications for the Razer Barracuda X
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/barracuda-tray
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
