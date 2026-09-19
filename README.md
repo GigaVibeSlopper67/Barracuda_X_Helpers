@@ -2,7 +2,8 @@
 
 Battery level of the **Razer Barracuda X** (2.4 GHz USB dongle, `VID:PID 1532:0536`),
 read directly over HID on Linux. Reverse-engineered from sibling-device projects
-(Razer Nari dongle family) and validated live on this machine (Fedora, 2026-09-18).
+(Razer Nari dongle family) and validated live on this machine (Fedora,
+2026-09-18/19 — discharge, charge and fully-charged states all observed).
 
 ## Usage
 
@@ -46,17 +47,25 @@ on the wire). No kernel driver, no Synapse, no root needed on this box
 | `[0]`  | u8      | `0xFF` report-id echo                                          |
 | `[1..8]`|        | `0f 05 fe 12 04 1f 08 05` — constant header in all captures    |
 | `[9]`  | u8      | **charge status**: `0x03` discharging · `0x05` charging · `0x06` fully charged |
-| `[10..11]` |     | `05 01` here (`05 02` on the Nari — model-related)             |
+| `[10..11]` |     | varies with state — `03 05` charging · `05 06` fully charged (Nari: `05 01`/`05 02`) |
 | `[12..13]` | u16 BE | **battery voltage in millivolts** (primary signal)          |
 | `[14]` | u8      | **battery percent**, firmware-reported (sanity check)          |
 | `[15..63]` |     | zero (the Nari variant packs a version string + TLV payload here) |
 
-Example (live, this PC):
+Example (live, this PC) — charging at 80 %:
 
 ```
 ff 0f 05 fe 12 04 1f 08 05 05 03 05 10 20 50 00 …
                              │           │  │
                      [9]=05 charging  4128 mV  80%
+```
+
+and fully charged (2026-09-19) — note the flat 4200 mV and `[10..11]` = `05 06`:
+
+```
+ff 0f 05 fe 12 04 1f 08 05 06 05 06 10 68 64 00 …
+                             │           │  │
+                     [9]=06 fully charged  4200 mV  100%
 ```
 
 ### Validation performed
@@ -67,6 +76,15 @@ ff 0f 05 fe 12 04 1f 08 05 05 03 05 10 20 50 00 …
 * Cross-checks agree: ~3.78 V ≈ 78–82% on a Li-ion curve ≈ byte `[14]` = 80.
 * Nari reference capture from RazerNariBatteryLevel decodes with the same
   offsets: `…0d e0 1e…` = 0x0DE0 = 3552 mV, `[14]` = 0x1e = 30%.
+* Fully-charged end state confirmed (2026-09-19, charge cycle run to the end):
+  `[9]` = `0x06` exactly as assumed from the Nari docs, `[14]` = `0x64` = 100 %,
+  and the voltage field pinned at a flat **4200 mV** (`0x1068` — the nominal
+  4.2 V Li-ion full voltage; a steady reported value, not a live cell
+  measurement). While charging, the same field varies and can read higher.
+  Capture: `… 05 06 05 06 10 68 64 00 …` → fully charged · 4200 mV · 100 %.
+* Bytes `[10..11]` look like a `[previous][current]` status pair: the
+  discharging→charging capture reads `03 05`, charging→fully-charged reads
+  `05 06` — `[11]` always mirrors `[9]`.
 
 ## Gotchas (read before building a tray)
 
@@ -84,9 +102,15 @@ ff 0f 05 fe 12 04 1f 08 05 05 03 05 10 20 50 00 …
 * Polling the query is benign (Synapse does it every few seconds); 5–10 s
   intervals are plenty. NariMeter derives % from the mV reading and uses `[14]`
   only as a sanity check — you can do the same and calibrate mV↔% bounds over a
-  full charge cycle.
-* Charge-status values `0x06` (full) / others are taken from the Nari docs;
-  only `0x03` and `0x05` were observed live so far.
+  full charge cycle (top of the range now measured: fully charged = constant
+  4200 mV ↔ 100 %).
+* Charge-status values come from the Nari docs; as of 2026-09-19 all three real
+  states are confirmed live on this dongle (`0x03` discharging, `0x05` charging,
+  `0x06` fully charged). `0x00` shows up only in the empty-cache case above.
+* The 4200 mV in the fully-charged state is a reported constant (rock-steady
+  across polls), not a live cell measurement — and while charging the reading
+  can be higher. Don't treat 4200 mV as a range ceiling or detect "full" from a
+  mV threshold; use status `0x06` as the reliable end-of-charge signal.
 
 ## Sources
 
