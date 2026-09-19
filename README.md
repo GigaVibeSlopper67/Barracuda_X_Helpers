@@ -142,6 +142,12 @@ a throwaway frame to drain the queue.
   `26 00 09 88`; console errors are reported verbatim.  Full write-up with
   evidence tables: `docs/barracudapro.md`.
 
+  **Pro probing is experimental and has hung the dongle once** (audio stopped
+  until a USB replug): never let `arglen` differ from the payload length, and
+  don't point the polling tools (`barracuda-watch`, `barracuda-tray`) at a
+  `053a` dongle until the grammar is confirmed against a Synapse capture —
+  see `docs/barracudapro.md` §7.
+
 Other classes seen answering: `0x04`/`0x05`/`0x07`/`0x09`/`0x0a` (short
 diagnostic replies, contents not yet decoded); unknown console commands
 answer `"<x> is not a valid command"`, other unknown frames answer silence.

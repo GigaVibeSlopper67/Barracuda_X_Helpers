@@ -167,3 +167,48 @@ traffic; only the console/class-09 query reads the battery.
 3. Blob timer fields and payload[0..3] semantics.
 4. Classes 0x04/0x05/0x07/0x0a diagnostic replies — probably not needed
    for battery, but they may contain richer status.
+
+## 7. Incident: a probe burst hung the dongle (2026-09-19)
+
+During the first probing session the dongle stopped working entirely:
+**audio output died and only a USB replug brought it back** (the hidraw
+console went silent at the same time). The prime suspect is our own traffic —
+that session had just sent a burst of 256 class-08 parameter reads and
+several experimental class-02 console frames, and one later probe
+deliberately used an `arglen` overrun (`0x40` with a 1-byte payload), which
+wedges the frame parser (§3). A parser wedge alone should not kill audio, so
+the firmware most likely asserts/hangs and the whole dongle — including its
+USB audio functions — stays dead until it is re-enumerated. Correlation, not
+proof, but the safe conclusion is that this protocol is fragile:
+
+* **Never send an `arglen` that differs from the real payload length**
+  (`barracuda_battery.py::_frame` now derives both from the payload and
+  rejects oversized payloads).
+* Avoid bursts and polling loops: `barracuda-watch` (5 s default) and
+  `barracuda-tray` (30 s) each fire the full 3-frame Pro probe set every
+  tick — **do not run them against a 053a dongle** until the frame grammar
+  is confirmed.
+* The reader's class-09 `cmd 04` query is an **invented** command (7 zero
+  argument bytes): plausibly legal, but unverified.
+* Keep a replug handy — it has always restored the dongle so far.
+
+### Next step: capture Synapse on Windows
+
+OpenRazer has no Barracuda (053a) support at all (its headset drivers cover
+only the older Kraken family, which speak a different "control message"
+protocol), so there is no reference implementation to copy. A USBPcap capture
+of Synapse is therefore the recommended next step:
+
+1. Install Wireshark on Windows **with the USBPcap component**.
+2. Capture on the root hub hosting the dongle; open Synapse and let it poll
+   for ~60 s while you (a) open the battery/headset panel, (b) unplug and
+   replug the charger (charge-state change) and (c) power the headset off
+   and on.
+3. Keep only the dongle's traffic
+   (`usb.idVendor == 0x1532 && usb.idProduct == 0x053a`) and export the
+   displayed packets to `.pcapng`.
+4. What to look for: interrupt transfers on interface 3 (EP 3 OUT / EP 4 IN)
+   carrying `01 80 <len> 50 41 …`; whether `<len>` always equals the payload
+   length; which class carries the battery poll (0x02 console / 0x08 param /
+   0x09 status) and its exact command bytes; the poll cadence; and whether
+   Synapse sends anything after a query to flush the reply.

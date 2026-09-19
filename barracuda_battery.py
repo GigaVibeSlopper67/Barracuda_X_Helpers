@@ -43,6 +43,13 @@ Protocol (reverse-engineered; same Macronix dongle generation as the Razer Nari)
   the blob marker 26 00 09 88 and reporting console errors verbatim.
   Full write-up: docs/barracudapro.md.
 
+  WARNING: Pro probing is EXPERIMENTAL.  The frames above are
+  reverse-engineered guesses (the class-09 cmd-04 query is invented), and a
+  probe burst has already hung this dongle - audio playback died until the
+  dongle was replugged.  Never let arglen differ from the payload length,
+  avoid bursts and polling loops (barracuda-watch/barracuda-tray) on a 053a
+  dongle, and keep a replug handy.  See docs/barracudapro.md §7.
+
 CLI:
   barracuda_battery.py              one-shot, human readable
   barracuda_battery.py --json       machine readable (for tray apps)
@@ -128,7 +135,12 @@ def _x_read_state(dev):
 
 
 def _frame(cls, payload):
-    """Build a 64-byte Pro 'PA' frame (EP 3 OUT, report id 0x01)."""
+    """Build a 64-byte Pro 'PA' frame (EP 3 OUT, report id 0x01).
+
+    arglen and the length byte are derived from the payload, so they can
+    never disagree - an arglen overrun wedges the dongle's frame parser."""
+    if not 0 <= len(payload) <= 57:                   # 7-byte header
+        raise ValueError(f"Pro frame payload too long: {len(payload)} bytes (max 57)")
     f = bytearray(64)
     f[0] = 1
     f[1] = 0x80
@@ -179,7 +191,11 @@ def _pro_read_state(dev):
     order: the console `bat` line, a class-09 cmd-04 query, then the `bat`
     line again with a longer window (each write also flushes earlier queued
     replies).  Every reply is scanned for the 36-byte status blob; console
-    errors are collected for the diagnostics.  See docs/barracudapro.md."""
+    errors are collected for the diagnostics.  See docs/barracudapro.md.
+
+    EXPERIMENTAL: this traffic is guessed (see the module docstring warning);
+    a probe burst has hung the dongle before (audio lost until replug).  Keep
+    every frame length-consistent and avoid polling loops on a 053a dongle."""
     fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
     try:
         # drop stale queued console output
