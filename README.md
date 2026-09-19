@@ -102,16 +102,26 @@ newer "PA" frame protocol over the interrupt endpoints instead (report id 0x01,
 64-byte packets):
 
     request:  01 80 <len> 50 41 <class> <arglen> <cmd> <args..>
-    response: 01 80 <len> 50 49 01 c0 <seq..> <data..>
+    response: 01 80 <len> 50 49 <class> <seq> <tick3> <data..>
 
-(`50 41` = "PA" request tag, `50 49` = "PI" response tag.)  Responses are
-QUEUED and only flushed when the next frame is written — a reader must send
-a throwaway frame to drain the queue.
+(`50 41` = "PA" request tag, `50 49` = "PI" response tag, `<len>` = 4 + the
+argument bytes after `<arglen>`/`<seq>`.)  For class `0x08` the `<arglen>` byte
+is a constant `08` — **not** the payload length (reads carry 4 bytes, writes
+5) — and a response carries a per-response sequence byte plus a 3-byte
+little-endian device timestamp (~800 ticks/s).  A Synapse USBPcap capture
+(2026-09-20; `docs/barracudapro.md` §8, decoded with `./pcapng_razer.py
+--frames`) confirmed all of this: Synapse gets its reply 10.7–21.4 ms after each
+request, with two IN URBs kept pending and **no flush frame** — the "queued
+until the next write" behaviour we saw on Linux is most likely an artifact of
+how our probes read (and of a wedged parser after a malformed frame).
 
-* class `0x08` = Synapse settings channel: read `03 <param> 00`, write
+* class `0x08` = Synapse settings channel: read `03 <param> 00 00`, write
   `04 <param> 00 <len> <val>`, multi-write `0d <param> 00 <n> <vals>…`.
   Known params (from Synapse captures, openrazer issue #2009): ANC `0x12/0x92`,
   EQ `0x1e/0x96/0x97`, mic monitor `0x18/0x98/0x99`, power-saving `0x2c/0xac`.
+  The 2026-09-20 capture exercised `0x12`/`0x92` and `0x2c`/`0xac`: the write
+  side is always the read param + `0x80`, the written value reads back on the
+  next poll, and a write **ack reports `value = 00`**, not the written value.
   Unknown params answer silence; the console channel (below) answers
   `"<cmd> is not a command"`.
 * class `0x02` = line-oriented firmware console.  In its "append mode"
@@ -130,9 +140,11 @@ a throwaway frame to drain the queue.
   - fresh after a replug it runs in **data mode**: the payload is consumed
     as data, payload text never reaches the command line, and probes are
     answered within a second with e.g. "P is not a valid command";
-  - a frame whose `arglen` exceeds its payload **wedges** the console
+  - a frame whose `arglen` is absurdly large **wedges** the console
     completely silent (all later frames are eaten as data) until the next
-    replug;
+    replug — note `arglen` is *not* the payload length (class-08 Synapse
+    traffic runs `arglen 08` with 4-5 byte payloads); what broke the dongle
+    was `arglen 0x40`, larger than the whole frame;
   - in append mode `bat`/`adc` are accepted silently and produce the blob.
 
   What switches the console into append mode is unknown.  Console replies
@@ -142,11 +154,32 @@ a throwaway frame to drain the queue.
   `26 00 09 88`; console errors are reported verbatim.  Full write-up with
   evidence tables: `docs/barracudapro.md`.
 
-  **Pro probing is experimental and has hung the dongle once** (audio stopped
-  until a USB replug): never let `arglen` differ from the payload length, and
-  don't point the polling tools (`barracuda-watch`, `barracuda-tray`) at a
-  `053a` dongle until the grammar is confirmed against a Synapse capture —
-  see `docs/barracudapro.md` §7.
+  **Pro probing used to hang the dongle** (audio stopped until a USB replug),
+  and the class-02/class-09 probes are the prime suspect — Synapse never sends
+  them.  They are opt-in now (`--legacy-console-probes`); the default path only
+  sends class-08 reads that are byte-identical to Synapse's own traffic, and the
+  first frame is the ANC read (param `0x12`) that decides whether the dongle is
+  answering at all:
+
+  ```bash
+  ./barracuda_battery.py --sweep 12               # is the channel alive?
+  ./barracuda_battery.py --sweep                  # hunt for a battery param
+  ./barracuda_battery.py --sweep 12 --dry-run     # print the frame, send nothing
+  ./barracuda_battery.py --legacy-console-probes  # the old, risky probes
+  ```
+
+  Silence to that anchor read is the signature of the wedged state (audio dead,
+  device still enumerated): replug the dongle.  No battery parameter is known on
+  class 0x08 yet, so `read_state()` says exactly that; `docs/barracudapro.md`
+  §8.5/§9 has the Windows capture recipe that would settle it.
+
+Captures can be analysed without Wireshark (`pcaps/` is git-ignored):
+
+```bash
+./pcapng_razer.py 'pcaps/Razer Synapse.pcapng'                       # bus overview
+./pcapng_razer.py 'pcaps/Razer Synapse.pcapng' --devices             # descriptors
+./pcapng_razer.py 'pcaps/Razer Synapse.pcapng' --frames --vid 1532 --pid 053a
+```
 
 Other classes seen answering: `0x04`/`0x05`/`0x07`/`0x09`/`0x0a` (short
 diagnostic replies, contents not yet decoded); unknown console commands

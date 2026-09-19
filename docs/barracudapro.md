@@ -7,13 +7,6 @@ Features:
 - Mute Button (Probably mechanical, I don't know)
 - Volume: Clicky wheel endless scroll, gives audio beep for lowest and highest point
 
-Curent State in the beginning:
-- ANC ON
-- Max Vol
-- Unknown Charge
-- Plugged in for charging
-- Pairedvia 2.4 GHZ Dongle
-
 ---
 
 # Reverse-engineering findings — Barracuda Pro 2.4 dongle (1532:053a)
@@ -46,8 +39,13 @@ request : 01 80 <len> 50 41 <class> <arglen> <payload...>   ("PA" = 50 41)
 response: 01 80 <len> 50 49 01 c0 <seq2> <ctr2> <data...>   ("PI" = 50 49)
 ```
 
-* `<len>` = 4 + payload length. `<arglen>` = payload length.
-* `<seq2>` increments per response; `<ctr2>` per request.
+* `<len>` = 4 + the argument bytes that follow the `<arglen>`/`<seq>` byte.
+* Request byte 6 (`<arglen>`) is **0x08 for every class-08 request ever
+  captured**, and is *not* the payload length (those are 4-5 bytes long) —
+  see §8.2.  A payload whose length differs from `<arglen>` is legal (Synapse
+  does it constantly); an `<arglen>` larger than the frame is not.
+* `<seq2>` is really the per-response sequence byte; `<ctr2>` turned out to be
+  the first bytes of a 3-byte little-endian device timestamp (§8.2).
 * Latency: settings reads answer in 13-38 ms.
 * The dongle is strictly pull-based: 92 s of passive listening produced zero
   frames. It pushes only on state changes, e.g. replug produces a
@@ -150,11 +148,14 @@ traffic; only the console/class-09 query reads the battery.
 
 * `barracuda_battery.py` auto-detects the PID and dispatches:
   X family -> 0xFF feature report (percent [14], mV [12:14] BE, status [9]);
-  Pro (053a) -> probes the console `bat` line, a class-09 `cmd 04` query and
-  the `bat` line again with a longer window, scanning replies for the
-  `26 00 09 88` blob marker; millivolts is `None` on the Pro. If the console
-  answers with command errors instead, the reader reports them — that means
-  data mode (see §3) and the blob is not reachable without the append mode.
+  Pro (053a) -> **only Synapse-shaped class-08 reads** (§8): the first frame is
+  the ANC read (param 0x12) that Synapse itself sends on connect. If that
+  answers, the reader looks for a battery parameter; if it stays silent the
+  reader raises a clear error and sends nothing else (silence to that frame is
+  the signature of the wedged state, §7). `millivolts` is `None` on the Pro.
+  `--sweep [LO-HI]` hunts for a class-08 battery parameter (anchor-gated,
+  paced, aborts on silence) and `--legacy-console-probes` re-enables the old
+  class-02/0x09 guesses, which have killed audio until a replug.
 * `barracuda-watch` / `barracuda-tray` render `millivolts=None` gracefully.
 * `install/70-barracuda.rules` grants uaccess to 053a.
 
@@ -167,6 +168,10 @@ traffic; only the console/class-09 query reads the battery.
 3. Blob timer fields and payload[0..3] semantics.
 4. Classes 0x04/0x05/0x07/0x0a diagnostic replies — probably not needed
    for battery, but they may contain richer status.
+5. Class 0x08 is now pinned down against real Synapse traffic (§8); class 0x02
+   (console) and class 0x09 still have no Synapse reference — a capture in
+   which Synapse actually reads the battery would resolve both at once.  So
+   far Synapse never touched them (§8.5).
 
 ## 7. Incident: a probe burst hung the dongle (2026-09-19)
 
@@ -194,6 +199,11 @@ proof, but the safe conclusion is that this protocol is fragile:
 
 ### Next step: capture Synapse on Windows
 
+**Done 2026-09-20 — see §8.**  The capture nailed down the class-08 frame
+grammar and the response envelope, but it contains **no battery query at all**
+(no class-02/class-09 frame, no feature report, no `26 00 09 88` blob in
+22 s); it needs to be repeated with the battery % visible in Synapse.
+
 OpenRazer has no Barracuda (053a) support at all (its headset drivers cover
 only the older Kraken family, which speak a different "control message"
 protocol), so there is no reference implementation to copy. A USBPcap capture
@@ -212,3 +222,232 @@ of Synapse is therefore the recommended next step:
    length; which class carries the battery poll (0x02 console / 0x08 param /
    0x09 status) and its exact command bytes; the poll cadence; and whether
    Synapse sends anything after a query to flush the reply.
+
+---
+
+## 8. Synapse capture on Windows (USBPcap, 2026-09-20) — class-08 grammar confirmed
+
+Source: `pcaps/Razer Synapse.pcapng` (5.0 MB, 7560 packets, **21.88 s**),
+dumpcap/Wireshark 4.6.8 on 64-bit Windows 10 20H2 (build 19042) running in a
+VM (the same root hub also carries a QEMU virtual HID device `0627:0001`),
+captured on `\\.\USBPcap1`, link type 249.  Analyzer (stdlib only, no
+Wireshark needed):
+
+```
+./pcapng_razer.py 'pcaps/Razer Synapse.pcapng'                       # overview
+./pcapng_razer.py 'pcaps/Razer Synapse.pcapng' --devices             # descriptors
+./pcapng_razer.py 'pcaps/Razer Synapse.pcapng' --frames --vid 1532 --pid 053a
+./pcapng_razer.py 'pcaps/Razer Synapse.pcapng' --dump --dev 2        # hex+ascii
+```
+
+### 8.1 What is on the bus
+
+| bus/dev | IDs | traffic (21.9 s) |
+|---|---|---|
+| 1/1 | `0627:0001` QEMU virtual HID | control + interrupt EP `0x81` — the VM's mouse/tablet, unrelated |
+| 1/2 | **`1532:053a`** | enumeration control transfers, ISO EP `0x07` (audio OUT, 2188 URBs of 1920 B, never stops), **INT EP `0x03` OUT x10 + EP `0x84` IN x12** |
+
+* The headset was linked and streaming audio for the whole capture, yet the
+  only vendor traffic is **22 class-08 frames** (10 requests, 12 responses).
+* No control transfer after `SET_CONFIGURATION` — no feature report, ever
+  (confirms §1: this dongle declares none and Synapse never tries).
+* No class-02 console frame, no class-09 frame and no `26 00 09 88` blob
+  anywhere in the capture.
+* The configuration descriptor (224 B, captured at t=0) confirms the layout:
+  iface 0 = audio control, iface 1 alt 1 = EP `0x07` iso OUT 192 B, iface 2
+  alt 1 = EP `0x88` iso IN 96 B, **iface 3 = HID (class 03/01, 103-byte report
+  descriptor, EP `0x84` IN + EP `0x03` OUT, 64-byte interrupt, interval 1)**.
+  So the PA/PI frames are HID **report id 1** reports on interface 3 = the
+  "EP 3 OUT / EP 4 IN" of §1.
+
+### 8.2 The frame envelope — confirmed and corrected
+
+| off | request (`PA`) | response (`PI`) |
+|-----|----------------|-----------------|
+| 0 | `01` HID report id | `01` |
+| 1 | `80` magic | `80` |
+| 2 | `<len>` | `<len>` |
+| 3-4 | `50 41` "PA" | `50 49` "PI" |
+| 5 | `<class>` | `<class>` (the data's channel: 08 here) |
+| 6 | `<arglen>` = **always `08`** for class 08 | `<seq>` per-response counter (`f4 f5 … ff`) |
+| 7… | `03 <param> 00 00` · `04 <param> 00 <vlen> <val>` | `<tick(3)> 00 04 00 <param> <kind> 01 <value>` |
+
+* `<len>` is exact and is counted **from byte 7**: read `01 80 08 …` = 4 + 4
+  (`03 12 00 00`), write `01 80 09 …` = 4 + 5 (`04 92 00 01 ff`), response
+  `01 80 0e …` = 4 + 10 (`f4 c6 28 be 00 04 00 12 01 01 0a`).  §2's rule
+  "`<len>` = 4 + payload" is right, but "payload" must be counted *after* the
+  `<arglen>`/`<seq>` byte, not after the class byte.
+* **Correction:** request byte 6 is a constant `0x08`, *not* the payload
+  length — Synapse sends it with 4-byte and 5-byte payloads alike.  It looks
+  like a fixed 8-byte argument area.  `barracuda_battery.py::_frame()` still
+  derives it from the payload length (which is what our class-02/09 probes
+  want); it now takes `arglen=8` if a Synapse-shaped class-08 frame is needed.
+* Response fields: class echo at [5], **per-response sequence byte** at [6]
+  (`f4`…`ff`, +1 for every response, solicited or not), a **3-byte
+  little-endian timestamp** at [7..9], then `00 04 00 <param> <kind> 01
+  <value>` (param/kind/value at frame offsets 13/14/16).
+  * The timestamp advances **exactly 800 ticks/s** (6080 ticks over the 7.600 s
+    between responses #2 and #22) and matches the host's capture clock to
+    <1 ms, i.e. it is the dongle's own clock; at capture time it read
+    `0xbe28c6` = 12 462 278 ≈ 4.33 h.  §2's "`<seq2>` `<ctr2>`" pair was in
+    fact the sequence byte plus the first timestamp bytes.
+  * So the `01 c0` seen after `50 49` in the older z3ntu captures is class
+    `01` + seq `c0`, not a fixed flag pair.
+  * `<kind>` = `0x01` reply to our command, `0x02` **unsolicited event**
+    (the dongle pushed these without any request, on the pending IN URB).
+* Write acknowledgements carry `value = 0x00`, **not** the value that was just
+  written — read the read-side parameter back to see the new state.
+
+### 8.3 The whole transcript (all 22 frames)
+
+| # | t (s) | dir | frame (hex, trimmed) | decoded |
+|---|-------|-----|----------------------|---------|
+| 1 | 6.1866 | req | `01 80 08  50 41 08 08 03 12 00 00` | read param `0x12` (ANC) |
+| 2 | 6.1974 | rsp | `01 80 0e  50 49 08 f4  c6 28 be … 12 01 01 0a` | param `0x12` = `0x0a` (reply) |
+| 3 | 6.2008 | req | `01 80 09  50 41 08 08 04 92 00 01 ff` | write `0x92` ← `0xff` |
+| 4 | 6.2154 | rsp | seq `f5` | param `0x92` ack |
+| 5 | 7.0076 | req | read `0x12` | |
+| 6 | 7.0174 | rsp | seq `f6` | param `0x12` = `0xff` ← the value just written |
+| 7 | 7.0202 | req | `04 92 00 01 0a` | write `0x92` ← `0x0a` |
+| 8 | 7.0344 | rsp | seq `f7` | param `0x92` ack |
+| 9 | 7.5254 | rsp | seq `f8` | param `0x12` = `0x0a`, **kind 02 — event, no request** |
+| 10 | 7.5311 | req | read `0x12` | |
+| 11 | 7.5424 | rsp | seq `f9` | param `0x12` = `0x0a` (reply) |
+| 12 | 8.6974 | rsp | seq `fa` | param `0x12` = `0x0a`, **kind 02 — event** |
+| 13 | 8.7014 | req | read `0x12` | |
+| 14 | 8.7124 | rsp | seq `fb` | param `0x12` = `0x0a` (reply) |
+| 15 | 13.1292 | req | `03 2c 00 00` | read `0x2c` (power saving) |
+| 16 | 13.1404 | rsp | seq `fc` | param `0x2c` = `0x00` |
+| 17 | 13.1416 | req | `04 ac 00 01 0f` | write `0xac` ← `0x0f` |
+| 18 | 13.1624 | rsp | seq `fd` | param `0xac` ack |
+| 19 | 13.7637 | req | read `0x2c` | |
+| 20 | 13.7744 | rsp | seq `fe` | param `0x2c` = `0x0f` ← the value just written |
+| 21 | 13.7760 | req | `04 ac 00 01 00` | write `0xac` ← `0x00` |
+| 22 | 13.7974 | rsp | seq `ff` | param `0xac` ack |
+
+Timing and plumbing:
+
+* Request → response latency **10.7-21.4 ms** (matches §2's 13-38 ms).
+* Every write is followed by a read of the read-side param, and both reads
+  reflect the written value on the next poll → the `+0x80` read/write param
+  pairing of §2 (`0x12`/`0x92`, `0x2c`/`0xac`) is confirmed end-to-end.
+* No flush frame: all 10 requests use the **same** OUT URB and the responses
+  arrive on two alternating IN URBs, i.e. Synapse simply keeps two reads
+  pending at all times.  §3's "replies queue until the next write" is *not*
+  what Synapse experiences — it is most likely an artifact of how our Linux
+  probes read (and of the wedged/framed state after a malformed frame).
+* The burst is a user fiddling with the UI (ANC on/off, power-saving on/off),
+  not a periodic poll: 6.2 s and 13.1 s, with 4.5 s of silence in between.
+
+### 8.4 What this confirms / refutes vs. the notes above
+
+| note | capture says |
+|---|---|
+| §1 053a = interface 3, EP 3 OUT / EP 4 IN, 64-byte interrupt, report id 1, **no feature reports** | ✔ exactly (HID iface 3, 103-byte report desc, EP `0x03`/`0x84`, 64 B, interval 1). No control transfer after `SET_CONFIGURATION` — Synapse never touches feature reports |
+| §2 envelope `01 80 <len> 50 41 <class> <arglen> …` | ✔ — but `<arglen>` is the constant `0x08` and `<len>` counts from byte 7 |
+| §2 response `… 50 49 01 c0 <seq2> <ctr2> …` | ✔ shape; `01` = class, `c0` = seq; `<ctr2>` is a 3-byte 800 Hz timestamp |
+| §2 class 08 read `03 <param> 00`, write `04 <param> 00 <len> <val>` | ✔ commands; ✔ params `0x12`/`0x92` and `0x2c`/`0xac`; the captured read payload is 4 bytes: `03 <param> 00 00` |
+| §2 read latency 13-38 ms | ✔ 10.7-21.4 ms measured |
+| §2 "strictly pull-based … pushes only on state changes" | ✔ — 2 spontaneous `kind 02` frames with no request in flight |
+| §2 "no battery parameter exists on class 0x08" | ✔ — none of the 22 frames touched one |
+| §2 params: a 256-param sweep found only `0x01`/`0x20` | ✔ consistent — Synapse only used `0x12` and `0x2c` |
+| §3 "replies queue and are only flushed by the next write" | ✘ — Synapse gets replies 10.7-21.4 ms after each request with no flush frame (two IN URBs kept pending) |
+| §7 "an `arglen` mismatch wedges the dongle" | refined — `arglen 0x08` with a 4-byte payload is *normal* Synapse traffic, so a mismatch alone is not the trigger; `arglen 0x40` (bigger than the frame) is the better suspect |
+
+### 8.5 The big negative: no battery query, and what to capture next
+
+* **Synapse did not ask for the battery once in 22 s.**  No class-02 console
+  frame, no class-09 frame, no feature report, no `26 00 09 88` blob.  The
+  entire vendor session is ANC (`0x12`/`0x92`) and power-saving
+  (`0x2c`/`0xac`) settings.
+* The dongle was (re-)enumerated at t=0 and Synapse opened it at 6.19 s — its
+  **first** frame is an ANC read, not a battery read.  So a fresh open does not
+  poll the battery either; either the battery UI was not open, or this device
+  has no battery readout in Synapse, or it is polled on a much slower timer
+  than 22 s.
+* Repeat the capture, longer and with the battery visible:
+  1. open the Synapse page that shows the headset battery (if it has one) and
+     keep it on screen;
+  2. capture 5-10 min instead of 22 s (the whole capture is only 5 MB, mostly
+     audio, so length is cheap);
+  3. while capturing: plug/unplug the charger, power the headset off/on, press
+     the ANC button — that is also how the charge-state codes (`0x07` = ?) and
+     the console append-mode trigger (§3, §6) get settled;
+  4. analyse with `./pcapng_razer.py CAP --dump --vid 1532 --pid 053a` and look
+     for anything that is not class 08.
+* If Synapse turns out to have no battery readout for the 053a at all, then the
+  class-09 `cmd 04` blob and the console `bat` line (§4) remain the only known
+  source, and the append-mode trigger is still the thing to solve.
+
+---
+
+## 9. Where to go from here (safe probing order)
+
+### 9.1 The tools are Synapse-shaped by default now
+
+| command | frames sent | status |
+|---|---|---|
+| `./barracuda_battery.py` (Pro dongle) | **one** class-08 read, param `0x12` (ANC) — byte-identical to Synapse's connect frame | verified on the wire (§8) |
+| `./barracuda_battery.py --sweep [LO-HI] [--pace S] [--dry-run]` | class-08 reads, paced 0.25 s, anchor-gated, aborts after 3 silences | safe shape, params unverified |
+| `./barracuda_battery.py --legacy-console-probes` | class-02 console `bat` + class-09 `cmd 04` | **prime suspect for the hangs** |
+
+Two other fixes in the same pass:
+
+* replies are now attributed by their *own* param field, so an answer that
+  arrives one frame late cannot be credited to the wrong parameter — the old
+  256-param sweep (§2) may simply have mis-read the map that way;
+* a read is retried once before it counts as silence, so §3's "the reply only
+  flushes when the next frame is written" cannot masquerade as an empty param.
+
+### 9.2 Is the dongle wedged right now? (one-frame test)
+
+```bash
+./barracuda_battery.py --sweep 12 --dry-run   # print the frame, send nothing
+./barracuda_battery.py --sweep 12             # anchor read + param 0x12
+```
+
+* `# anchor 0x12 -> 00 04 00 12 01 01 0a` → the channel is healthy;
+* pure silence → the wedged state of §7 (audio is dead too, only a replug
+  clears it).  Measured 2026-09-20 on this box immediately after a hang:
+  silence, on a dongle that was still enumerated (ALSA card 4 present) — the
+  wedge leaves the device on the bus but mute.
+
+### 9.3 Next steps, in order
+
+1. Replug the dongle and run `./barracuda_battery.py --sweep 12`. This settles
+   §7's open question: if the anchor answers on a fresh dongle, our class-08
+   framing is right and the class-02/class-09 frames are the crash trigger.
+2. If the anchor answers, run `./barracuda_battery.py --sweep` (all of 0x00-0x7f,
+   ~40 s) and look for a small value (percent) or a multi-byte payload. Put the
+   param in `PRO_BATTERY_PARAMS` and the reader works on the Pro.
+3. If even a fresh dongle ignores the anchor, our hidraw path differs from
+   Synapse's in a way Linux cannot show us — then only §9.4 helps.
+4. Capture Synapse in Windows with the battery on screen (§9.4).
+
+### 9.4 Windows capture recipe (the authoritative route)
+
+1. In Synapse, open the Barracuda Pro page and **check whether it shows a
+   battery percentage at all**; note the value and whether it ever changes.
+2. Start dumpcap/USBPcap on the hub hosting the dongle **before** plugging the
+   dongle in, so the enumeration and Synapse's first frames are inside the
+   capture; then capture **5-10 min** (the whole 22 s capture was 5 MB, mostly
+   audio — length is cheap).
+3. Leave it alone for the first minute (that reveals the poll cadence), then:
+   plug/unplug the charger, power the headset off and on, press the ANC button,
+   and move every control in the page (ANC modes, EQ, mic monitor, power
+   saving) one at a time, 2-3 s apart.
+4. Stop, filter `usb.idVendor == 0x1532 && usb.idProduct == 0x053a`, save the
+   pcapng, and decode it in seconds without Wireshark:
+
+   ```bash
+   ./pcapng_razer.py CAP --frames --vid 1532 --pid 053a
+   ./pcapng_razer.py CAP --dump  --vid 1532 --pid 053a | grep -v ' iso '
+   ```
+
+5. What would settle it: **any** frame that is not `class 08 cmd 03/04` (that is
+   the battery path we cannot guess), or a class-08 read of an unseen param
+   (anything besides `0x12`/`0x2c`; a battery percent is a natural candidate for
+   a once-a-minute poll).  If Synapse reads no battery for this device at all,
+   then the battery really lives only on the class-02/0x09 path of §4, and §3/§7
+   have to be re-opened with `arglen <= 8` framing.
+

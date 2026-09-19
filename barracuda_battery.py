@@ -16,16 +16,25 @@ Protocol (reverse-engineered; same Macronix dongle generation as the Razer Nari)
   The 90-byte Synapse/razer_report protocol (used by the Barracuda 1532:053C)
   is NOT supported by this dongle - it STALLs (EPIPE). Don't use it.
 * Barracuda Pro 2.4 (053a): "PA" frames over the vendor INTERRUPT endpoints
-  (EP 3 OUT / EP 4 IN, 64-byte packets, report id 0x01):
+  (EP 3 OUT / EP 4 IN, 64-byte HID report id 0x01 - confirmed by the config
+  descriptor and by Synapse traffic, docs/barracudapro.md §8):
 
       request:  01 80 <len> 50 41 <class> <arglen> <cmd> <args..>
-      response: 01 80 <len> 50 49 01 c0 <seq..> <data..>
+      response: 01 80 <len> 50 49 <class> <seq> <tick3> <data..>
 
-  class 0x08 = Synapse settings channel (read 03 <param> 00, write 04 ...;
-  no battery param there - a 256-param sweep answered only 0x01/0x20).
-  class 0x02 = line-oriented firmware console, class 0x09 = status channel.
-  Both the console "bat" line and a class-09 cmd-04 query have returned the
-  36-byte battery status frame:
+  <len> = 4 + the argument bytes after <arglen>/<seq>.  For class 0x08 the
+  <arglen> byte is a constant 0x08 (not the payload length) and replies arrive
+  11-20 ms after the request with no flush frame needed; frames the dongle
+  pushes on its own carry kind 0x02 instead of 0x01.  See §8 of the write-up.
+
+  class 0x08 = Synapse settings channel.  This is the ONLY channel Synapse was
+  ever observed using (read `03 <param> 00 00`, write `04 <param> 00 <len>
+  <val>`), so it is the only one this reader sends by default.  No battery
+  parameter is known on it yet - Synapse never read one in 22 s, and our own
+  256-param sweep only saw 0x01/0x20 because the dongle was mis-framing (a
+  fresh sweep with Synapse-shaped frames is `--sweep`).
+  class 0x02 = line-oriented debug console, class 0x09 = status channel.  Both
+  have returned the 36-byte battery status frame:
 
       01 00 26 00 09 88 <36-byte payload>
 
@@ -33,28 +42,28 @@ Protocol (reverse-engineered; same Macronix dongle generation as the Razer Nari)
       payload[8..11]  u32 charge level in percent (0x56 = 86)
       payload[12..]   ms-resolution timers (one = dongle uptime)
 
-  The console is state-dependent: fresh after a replug it runs in "data
-  mode" (payload text never reaches the command line -> "X is not a valid
-  command"), an arglen overrun wedges it silent until the next replug, and
-  in its "append mode" (observed once, trigger unknown) the "bat" line
-  works.  Console replies can queue for 2-13 s and are flushed by the next
-  write.  This reader probes the console line, a class-09 cmd-04 query and
-  the console line again with a longer window, scanning every reply for
-  the blob marker 26 00 09 88 and reporting console errors verbatim.
-  Full write-up: docs/barracudapro.md.
+  but Synapse never uses either class, and the console is state-dependent
+  (fresh = "data mode", where payload text never reaches the command line; its
+  reply queue can lag 2-13 s).  They are the prime suspect for the hangs this
+  dongle suffers, so they are opt-in only: `--legacy-console-probes`.
 
-  WARNING: Pro probing is EXPERIMENTAL.  The frames above are
-  reverse-engineered guesses (the class-09 cmd-04 query is invented), and a
-  probe burst has already hung this dongle - audio playback died until the
-  dongle was replugged.  Never let arglen differ from the payload length,
-  avoid bursts and polling loops (barracuda-watch/barracuda-tray) on a 053a
-  dongle, and keep a replug handy.  See docs/barracudapro.md §7.
+  WARNING: `--legacy-console-probes` is EXPERIMENTAL and has killed audio
+  until a USB replug (docs/barracudapro.md §7).  The default path is much
+  safer: a single Synapse-shaped class-08 read (param 0x12 ANC, byte-identical
+  to Synapse's own connect frame) decides whether the dongle is answering, and
+  nothing else is sent unless a battery parameter has been identified.
 
 CLI:
   barracuda_battery.py              one-shot, human readable
   barracuda_battery.py --json       machine readable (for tray apps)
   barracuda_battery.py -v           include raw state hex
   barracuda_battery.py --dev PATH   override device (default: auto-detect)
+  barracuda_battery.py --sweep [LO-HI] [--pace S] [--dry-run]
+                                    look for a class-08 battery param with
+                                    Synapse-shaped reads (default 0x00-0x7f)
+  barracuda_battery.py --legacy-console-probes
+                                    send the old class-02/0x09 guesses (can
+                                    kill audio until a replug)
 
 Library:
   from barracuda_battery import read_state
@@ -134,20 +143,28 @@ def _x_read_state(dev):
     }
 
 
-def _frame(cls, payload):
+def _frame(cls, payload, arglen=None):
     """Build a 64-byte Pro 'PA' frame (EP 3 OUT, report id 0x01).
 
-    arglen and the length byte are derived from the payload, so they can
-    never disagree - an arglen overrun wedges the dongle's frame parser."""
+    `arglen` defaults to the payload length (what our class-02/09 probes use).
+    A Synapse capture showed that class-08 requests always carry arglen 0x08
+    no matter what the payload length is, so pass arglen=8 for a
+    Synapse-shaped class-08 frame (docs/barracudapro.md §8.2).
+
+    The frame length byte is always derived from the payload, and an oversized
+    payload is rejected: a frame whose arglen runs past the 64-byte report
+    wedges the dongle's parser (see docs/barracudapro.md §7)."""
     if not 0 <= len(payload) <= 57:                   # 7-byte header
         raise ValueError(f"Pro frame payload too long: {len(payload)} bytes (max 57)")
+    if arglen is not None and not 0 <= arglen <= 57:
+        raise ValueError(f"Pro frame arglen out of range: {arglen} (0..57)")
     f = bytearray(64)
     f[0] = 1
     f[1] = 0x80
     f[3] = 0x50
     f[4] = 0x41
     f[5] = cls
-    f[6] = len(payload)
+    f[6] = len(payload) if arglen is None else arglen
     f[7:7 + len(payload)] = payload
     f[2] = 4 + len(payload)
     return f
@@ -182,20 +199,147 @@ def _console_line(buf):
     return txt or "<empty>"
 
 
-def _pro_read_state(dev):
-    """Barracuda Pro: query the battery via console / status class.
+# --- Pro (053a) class-08 channel - verified against Synapse's own traffic ----
+# docs/barracudapro.md §8 (Synapse USBPcap capture, 2026-09-20):
+#   read   01 80 08 50 41 08 08 03 <param> 00 00
+#   write  01 80 09 50 41 08 08 04 <param> 00 <vlen> <val>
+#   reply  01 80 0e 50 49 08 <seq> <tick3> 00 04 00 <param> <kind> 01 <value>
+# arglen (byte 6) is a constant 0x08 - NOT the payload length; <len> (byte 2)
+# is 4 + the argument bytes.  class 0x02 (console) and 0x09 (status) are
+# unverified guesses that Synapse never sends and that have hung this dongle
+# (§7) - they are reachable only through --legacy-console-probes.
 
-    The Pro's console is state-dependent (fresh = data mode, payload text
-    never reaches the command line; arglen overrun = silent wedge until
-    replug; append mode = the `bat` line works).  Probe shapes tried in
-    order: the console `bat` line, a class-09 cmd-04 query, then the `bat`
-    line again with a longer window (each write also flushes earlier queued
-    replies).  Every reply is scanned for the 36-byte status blob; console
-    errors are collected for the diagnostics.  See docs/barracudapro.md.
+PRO_ANCHOR_PARAM = 0x12          # ANC read - literally Synapse's first frame
+PRO_SWEEP_RANGE = (0x00, 0x7F)   # read-side params Synapse's UI talks to
+PRO_BATTERY_PARAMS = ()          # empty: no battery param known yet (see §8.5)
 
-    EXPERIMENTAL: this traffic is guessed (see the module docstring warning);
-    a probe burst has hung the dongle before (audio lost until replug).  Keep
-    every frame length-consistent and avoid polling loops on a 053a dongle."""
+
+def _pro_read_frame(param):
+    """Synapse-shaped class-08 read: `03 <param> 00 00` with arglen 0x08."""
+    return _frame(0x08, bytes([0x03, param, 0x00, 0x00]), arglen=8)
+
+
+def _pi_frames(buf):
+    """Decode every complete 'PI' reply found in a raw hidraw read buffer."""
+    out, o = [], 0
+    while o + 11 <= len(buf):
+        if buf[o:o + 2] != b"\x01\x80" or buf[o + 3:o + 5] != b"PI":
+            o += 1
+            continue
+        end = min(len(buf), o + buf[o + 2] + 3)      # <len> = 4 + bytes after [6]
+        d = buf[o:end]
+        f = {"class": d[5], "seq": d[6], "tick": d[7] | d[8] << 8 | d[9] << 16,
+             "param": None, "kind": None, "value": None, "data": bytes(d[10:])}
+        if len(d) >= 17 and d[11] == 0x04:           # 00 04 00 <param> <kind> 01 <v>
+            f["param"], f["kind"], f["value"] = d[13], d[14], d[16]
+        out.append(f)
+        o = end if end > o else o + 1
+    return out
+
+
+def _pro_drain(fd):
+    """Discard queued replies so a query cannot match a stale frame."""
+    try:
+        while select.select([fd], [], [], 0)[0]:
+            os.read(fd, 64)
+    except OSError:
+        pass
+
+
+def _pro_query(fd, param, window=0.5, attempts=2):
+    """Send Synapse-shaped class-08 reads for `param`; return (reply, raw bytes).
+
+    `reply` is the PI frame answering `param` with kind 0x01 (a reply - not an
+    unsolicited event), or None if nothing matched.  Up to `attempts` identical
+    reads go out: the second one also covers the "the dongle only flushes its
+    reply queue when the next frame is written" behaviour seen on Linux (§3),
+    so a reply can never be mistaken for silence."""
+    buf = b""
+    for _ in range(max(1, attempts)):
+        os.write(fd, _pro_read_frame(param))
+        end = time.time() + window
+        while time.time() < end:
+            if not select.select([fd], [], [], 0.1)[0]:
+                continue
+            try:
+                buf += os.read(fd, 64)
+            except OSError:
+                return None, buf
+            for f in _pi_frames(buf):
+                if f["param"] == param and f["kind"] == 0x01:
+                    return f, buf
+    return None, buf
+
+
+def _record(seen, buf):
+    """Collect every reply in a read buffer, keyed by param.
+
+    Replies are attributed by their own param field, not by which read they
+    answered, so a reply that arrives one frame late is still recorded."""
+    for f in _pi_frames(buf):
+        if f["param"] is not None and f["kind"] == 0x01:
+            seen.setdefault(f["param"], f)
+
+
+def _pro_read_state(dev, console=False):
+    """Barracuda Pro: read state over the Synapse-verified class-08 channel.
+
+    Safety rules (docs/barracudapro.md §7, §8) - all learned the hard way:
+      * only Synapse-shaped class-08 reads go out; Synapse's own traffic is the
+        only thing proven not to hang this dongle;
+      * the first frame is the ANC read (param 0x12) that Synapse sends when it
+        opens the device - if that does not answer we abort instead of
+        hammering a possibly wedged dongle;
+      * the class-02/class-09 probes that have killed audio are never sent
+        unless `console=True` (CLI only: --legacy-console-probes).
+
+    No battery parameter is known on class 0x08 yet - Synapse's 22 s capture
+    never read one - so this raises a TimeoutError with instructions unless
+    PRO_BATTERY_PARAMS has been filled in by `--sweep` or a new capture."""
+    fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        _pro_drain(fd)
+        anchor, _ = _pro_query(fd, PRO_ANCHOR_PARAM, 1.0)
+        if anchor is None and not console:
+            raise TimeoutError(
+                f"{dev}: no answer to the class-08 ANC read (param 0x12) that "
+                "Synapse uses on connect - the dongle looks wedged (audio stays "
+                "dead until a USB replug); see docs/barracudapro.md §9.2")
+        if anchor is None:
+            print(f"warning: {dev} did not answer the class-08 anchor read - it "
+                  "looks wedged; sending the requested legacy probes anyway",
+                  file=sys.stderr)
+        if console:
+            return _pro_console_probe(dev)
+        for param in PRO_BATTERY_PARAMS:
+            reply, _ = _pro_query(fd, param, 0.5)
+            if reply and reply["value"] is not None and reply["value"] <= 100:
+                return {
+                    "percent": reply["value"],
+                    "millivolts": None,
+                    "status": f"class-08 param 0x{param:02x}",
+                    "raw": reply["data"].hex(" "),
+                    "device": dev,
+                    "pid": 0x053A,
+                    "unix_time": time.time(),
+                }
+        raise TimeoutError(
+            f"no battery parameter is known for the Pro dongle yet (its class-08 "
+            f"channel answers, ANC param 0x12 = {anchor['data'].hex(' ')}) - "
+            "run --sweep or capture Synapse with the battery on screen; "
+            "docs/barracudapro.md §9")
+    finally:
+        os.close(fd)
+
+
+def _pro_console_probe(dev):
+    """Legacy probe set: class-02 console `bat` line + class-09 `cmd 04`.
+
+    Kept byte-for-byte as it was when it produced the one battery blob we ever
+    saw (docs/barracudapro.md §3/§4).  UNVERIFIED and DANGEROUS: Synapse never
+    sends these, the console is a debug channel, and its arglen here is 9 while
+    every Synapse frame carries 8 - the prime suspect for the hangs that kill
+    audio until a replug (§7).  Reachable only via --legacy-console-probes."""
     fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
     try:
         # drop stale queued console output
@@ -259,10 +403,12 @@ def _pro_read_state(dev):
         os.close(fd)
 
 
-def read_state(dev=None):
+def read_state(dev=None, console=False):
     """Query the dongle once. Returns dict with percent / millivolts / status / raw / device.
 
-    'millivolts' is None on the Pro (its console blob carries no voltage)."""
+    'millivolts' is None on the Pro (no voltage is exposed on its channel).
+    `console=True` re-enables the Pro's legacy class-02/0x09 probes - only the
+    CLI does that (--legacy-console-probes), because they have killed audio."""
     if dev is None:
         dev, pid = find_hidraw()
         if dev is None:
@@ -274,8 +420,104 @@ def read_state(dev=None):
             raise FileNotFoundError(f"cannot read uevent for {dev}")
         pro = pid in PRO_PIDS
     if pro:
-        return _pro_read_state(dev)
+        return _pro_read_state(dev, console)
     return _x_read_state(dev)
+
+
+def _pro_sweep(dev, lo, hi, pace=0.25, dry_run=False, max_fail=3):
+    """Hunt for a class-08 battery parameter with Synapse-shaped read frames.
+
+    Safety: the anchor read (param 0x12, exactly what Synapse sends on connect)
+    must answer before the sweep starts; reads are paced `pace` seconds apart
+    instead of being fired as a burst; and the sweep stops after `max_fail`
+    consecutive silent params, because a run of silence means the channel
+    stopped answering (replug), not that the params are empty."""
+    n = hi - lo + 1
+    print(f"# sweeping class-08 params 0x{lo:02x}..0x{hi:02x} on {dev} "
+          f"({n} reads, {pace:g} s apart)")
+    print(f"# frame per read: {bytes(_pro_read_frame(lo))[:12].hex()}")
+    if dry_run:
+        for p in range(lo, hi + 1):
+            print("DRY  %02x  %s" % (p, bytes(_pro_read_frame(p))[:11].hex(" ")))
+        return 0
+    fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
+    seen, fails = {}, 0
+    try:
+        _pro_drain(fd)
+        anchor, buf = _pro_query(fd, PRO_ANCHOR_PARAM, 1.0)
+        if anchor is None:
+            print("# anchor read (param 0x%02x) got no answer - the dongle is not "
+                  "answering.  Replug it and try again; silence to a "
+                  "Synapse-identical read is the signature of the wedged state "
+                  "(docs/barracudapro.md §7/§8.5)" % PRO_ANCHOR_PARAM)
+            return 1
+        print("# anchor 0x%02x -> %s" % (PRO_ANCHOR_PARAM, anchor["data"].hex(" ")))
+        _record(seen, buf)
+        t = time.time()
+        for p in range(lo, hi + 1):
+            wait = pace - (time.time() - t)
+            if wait > 0:
+                time.sleep(wait)
+            t = time.time()
+            reply, buf = _pro_query(fd, p, max(0.3, pace))
+            _record(seen, buf)
+            if reply is None and p not in seen:
+                fails += 1
+                if fails >= max_fail:
+                    print(f"# {fails} silent reads in a row (last param 0x{p:02x}) "
+                          "- stopping; the channel stopped answering, replug if "
+                          "the dongle is dead")
+                    break
+                continue
+            fails = 0
+            print("  read 0x%02x ..." % p, end="\r")
+    finally:
+        os.close(fd)
+    print("# %d of the %d params asked answered" % (len([p for p in seen if lo <= p <= hi]), n))
+    for p in sorted(seen):
+        f = seen[p]
+        val = "-" if f["value"] is None else "%d (0x%02x)" % (f["value"], f["value"])
+        print("  0x%02x value=%-9s data=%s" % (p, val, f["data"].hex(" ")))
+    print("# a battery candidate looks like a small value (<= 100 percent) or a "
+          "multi-byte payload; add its param to PRO_BATTERY_PARAMS in this file "
+          "and ./barracuda_battery.py starts reporting it")
+    return 0
+
+
+def _sweep_cli(dev, argv):
+    """`--sweep [LO-HI] [--pace SECONDS] [--dry-run]` argument handling.
+
+    The range is hex, with or without `0x` (`--sweep 12-2c`, `--sweep 0x12`,
+    `--sweep 3a-4f`); a single value means just that parameter."""
+    def param(txt):
+        txt = txt.strip().lower()
+        v = int(txt[2:], 16) if txt.startswith("0x") else int(txt, 16)
+        if not 0 <= v <= 0xFF:
+            sys.exit(f"error: param out of range: {txt}")
+        return v
+
+    lo, hi = PRO_SWEEP_RANGE
+    i = argv.index("--sweep")
+    if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+        a, _, b = argv[i + 1].partition("-")
+        lo = param(a)
+        hi = param(b) if b else lo
+        del argv[i:i + 2]
+    else:
+        del argv[i]
+    if lo > hi:
+        lo, hi = hi, lo
+    pace = float(argv[argv.index("--pace") + 1]) if "--pace" in argv else 0.25
+    if dev is None:
+        dev, pid = find_hidraw()
+        if dev is None:
+            sys.exit("error: Barracuda dongle not found")
+        if pid not in PRO_PIDS:
+            sys.exit(f"error: {dev} is not a Barracuda Pro (053a) dongle")
+    try:
+        return _pro_sweep(dev, lo, hi, pace, dry_run="--dry-run" in argv)
+    except OSError as e:
+        sys.exit(f"error: {e}")
 
 
 def main():
@@ -285,8 +527,15 @@ def main():
         i = argv.index("--dev")
         dev = argv[i + 1]
         del argv[i:i + 2]
+    if "--sweep" in argv:
+        sys.exit(_sweep_cli(dev, argv))
+    console = "--legacy-console-probes" in argv
+    if console:
+        print("warning: legacy console/class-09 probes are unverified and have "
+              "killed audio on this dongle until a replug - see "
+              "docs/barracudapro.md §7", file=sys.stderr)
     try:
-        s = read_state(dev)
+        s = read_state(dev, console)
     except (OSError, ValueError, TimeoutError, FileNotFoundError) as e:
         sys.exit(f"error: {e}")
     if "--json" in argv:
