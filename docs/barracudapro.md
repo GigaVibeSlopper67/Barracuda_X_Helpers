@@ -172,6 +172,17 @@ traffic; only the console/class-09 query reads the battery.
    (console) and class 0x09 still have no Synapse reference — a capture in
    which Synapse actually reads the battery would resolve both at once.  So
    far Synapse never touched them (§8.5).
+6. **Which frame actually kills the dongle?** Candidate: our guessed class-02
+   console frame (arglen 9) and the invented class-09 `cmd 04`.  Synapse only
+   ever sends class 0x08 with arglen 8, and a dongle wedged by a hang answers a
+   Synapse-identical class-08 read with silence (§9.2).  Test: a long
+   class-08-only session (see the runbook,
+   `docs/barracudapro-runbook.md` track C) must leave audio alive for hours.
+7. Does the class-08 map contain a battery parameter at all?  Our old sweep
+   that "found only 0x01/0x20" ran with mis-framed reads (arglen 3, 3-byte
+   payload) and possibly mis-attributed replies — Synapse proves 0x12 and 0x2c
+   answer, so that result is not trustworthy.  Re-run with
+   `./barracuda_battery.py --sweep` (§9.3 step 2).
 
 ## 7. Incident: a probe burst hung the dongle (2026-09-19)
 
@@ -214,9 +225,13 @@ of Synapse is therefore the recommended next step:
    for ~60 s while you (a) open the battery/headset panel, (b) unplug and
    replug the charger (charge-state change) and (c) power the headset off
    and on.
-3. Keep only the dongle's traffic
-   (`usb.idVendor == 0x1532 && usb.idProduct == 0x053a`) and export the
-   displayed packets to `.pcapng`.
+3. Keep only the dongle's traffic **by device address**, not by VID/PID:
+   `usb.idVendor`/`usb.idProduct` exist only inside the device descriptor, so a
+   display filter on them plus "export displayed packets" produces a 2-packet
+   file with no traffic in it (happened 2026-09-20).  Use
+   `usb.bus_id == 1 && usb.device_address == 2`, or export *all* packets and
+   let `./pcapng_razer.py --extract out.pcapng --pid 053a --no-iso` do the
+   selection.
 4. What to look for: interrupt transfers on interface 3 (EP 3 OUT / EP 4 IN)
    carrying `01 80 <len> 50 41 …`; whether `<len>` always equals the payload
    length; which class carries the battery poll (0x02 console / 0x08 param /
@@ -383,6 +398,9 @@ Timing and plumbing:
 
 ## 9. Where to go from here (safe probing order)
 
+The same steps as a copy-paste runbook, with decision tables and a log
+template: **`docs/barracudapro-runbook.md`**.
+
 ### 9.1 The tools are Synapse-shaped by default now
 
 | command | frames sent | status |
@@ -436,12 +454,15 @@ Two other fixes in the same pass:
    plug/unplug the charger, power the headset off and on, press the ANC button,
    and move every control in the page (ANC modes, EQ, mic monitor, power
    saving) one at a time, 2-3 s apart.
-4. Stop, filter `usb.idVendor == 0x1532 && usb.idProduct == 0x053a`, save the
-   pcapng, and decode it in seconds without Wireshark:
+4. Stop the capture, export it (see
+   §10.1: filter on `usb.bus_id`/`usb.device_address`, **never** on
+   `usb.idVendor`/`usb.idProduct` - those fields live only in the device
+   descriptor), and decode it in seconds without Wireshark:
 
    ```bash
    ./pcapng_razer.py CAP --frames --vid 1532 --pid 053a
-   ./pcapng_razer.py CAP --dump  --vid 1532 --pid 053a | grep -v ' iso '
+   ./pcapng_razer.py CAP --extract small.pcapng --pid 053a --no-iso   # shrink
+   ./pcapng_razer.py small.pcapng --dump --vid 1532 --pid 053a | grep -v ' iso '
    ```
 
 5. What would settle it: **any** frame that is not `class 08 cmd 03/04` (that is
@@ -450,4 +471,50 @@ Two other fixes in the same pass:
    a once-a-minute poll).  If Synapse reads no battery for this device at all,
    then the battery really lives only on the class-02/0x09 path of §4, and §3/§7
    have to be re-opened with `arglen <= 8` framing.
+
+---
+
+## 10. Capture inventory & the empty-export trap
+
+| file (in `pcaps/`, git-ignored) | md5 | captured | span | size | what is in it |
+|---|---|---|---|---|---|
+| `Razer Synapse.pcapng` | `81cddc48…` | 2026-09-20 | 21.876 s | 5.0 MB | 7560 packets: dongle enumeration + full config descriptor, 2188 audio URBs, **all 22 class-08 PA/PI frames** (§8.3), and an unrelated QEMU HID device on the same hub |
+| `Razer Synapse new.pcapng` | `b773bec2…` | 2026-09-20 | 153.754 s | 448 B | **2 packets only** — two 18-byte device descriptors (t=0 and t=153.75), nothing else |
+
+### 10.1 What went wrong in the 448-byte capture
+
+It was exported from Wireshark with *Export Specified Packets → Displayed* while
+the display filter `usb.idVendor == 0x1532 && usb.idProduct == 0x053a` was
+active.  Those two fields exist **only inside the device descriptor**, so no
+other packet can ever match: the file ends up holding the descriptor data
+stages and nothing else.  Two details confirm that diagnosis:
+
+* even the 8-byte *setup* stages are missing (they carry no VID/PID either),
+  which rules out a USBPcap capture filter — that one selects whole devices and
+  would have kept all of the dongle's traffic;
+* `pcapng_razer.py` sees no interrupt/iso/bulk transfer in the file at all.
+
+The two descriptors 153.75 s apart do show that the dongle enumerated twice in
+that window, i.e. it was replugged or reset by Windows — but with no data
+packets recorded the capture says nothing about the protocol.
+
+### 10.2 Correct way to trim a capture
+
+```bash
+# in Wireshark: filter by address, not by IDs, and then export displayed packets
+#   usb.bus_id == 1 && usb.device_address == 2
+# or simply export everything and let our tool do the selecting:
+./pcapng_razer.py 'pcaps/Razer Synapse.pcapng' --extract small.pcapng --pid 053a --no-iso
+#   4426 of 7560 packets kept, 5.0 MB -> 4.9 kB (the isochronous audio is >99 %
+#   of the bytes; all 22 PA/PI frames and the descriptors survive)
+```
+
+With `--no-iso` the kept span shrinks to the first..last kept packet (the audio
+that filled the gaps is gone), so read the frame timestamps, not the header
+span, when comparing runs.
+
+`pcapng_razer.py` now prints a hint when a capture contains no
+interrupt/iso/bulk transfer at all, and `--devices` says explicitly when a
+known device has no configuration descriptor in the file — both are exactly
+this failure mode.
 

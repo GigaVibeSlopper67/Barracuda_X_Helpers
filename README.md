@@ -173,13 +173,23 @@ how our probes read (and of a wedged parser after a malformed frame).
   class 0x08 yet, so `read_state()` says exactly that; `docs/barracudapro.md`
   §8.5/§9 has the Windows capture recipe that would settle it.
 
+  **Next round, step by step — including what to capture in Windows and what to
+  look for: [`docs/barracudapro-runbook.md`](docs/barracudapro-runbook.md).**
+
 Captures can be analysed without Wireshark (`pcaps/` is git-ignored):
 
 ```bash
 ./pcapng_razer.py 'pcaps/Razer Synapse.pcapng'                       # bus overview
 ./pcapng_razer.py 'pcaps/Razer Synapse.pcapng' --devices             # descriptors
 ./pcapng_razer.py 'pcaps/Razer Synapse.pcapng' --frames --vid 1532 --pid 053a
+./pcapng_razer.py 'pcaps/Razer Synapse.pcapng' \
+    --extract small.pcapng --pid 053a --no-iso                       # shrink to share
 ```
+
+Export pitfall: in Wireshark, `usb.idVendor`/`usb.idProduct` exist only in the
+device descriptor, so a display filter on them + "export displayed packets"
+gives a 2-packet file with no traffic.  Filter on `usb.bus_id` /
+`usb.device_address` instead (or export everything and use `--extract`).
 
 Other classes seen answering: `0x04`/`0x05`/`0x07`/`0x09`/`0x0a` (short
 diagnostic replies, contents not yet decoded); unknown console commands

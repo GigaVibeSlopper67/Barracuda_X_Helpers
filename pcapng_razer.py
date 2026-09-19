@@ -9,15 +9,25 @@ contains (VID/PID + descriptors) and decodes the Barracuda Pro (1532:053a)
 
 Usage:
   pcapng_razer.py CAPTURE.pcapng [--summary] [--devices] [--frames] [--dump]
+                                 [--extract OUT.pcapng]
                                  [--vid 1532] [--pid 053a] [--bus 1] [--dev 2]
 
   --summary  (default) per-device transfer/endpoint overview + timeline
   --devices  decode device/config descriptors (VID:PID, interfaces, endpoints)
   --frames   PA/PI frames, one block per frame, fields decoded (class 08)
   --dump     raw hex + ASCII of every data payload of the selected devices
+  --extract  write a new pcapng with only the selected devices' packets (the
+             original block bytes, lossless); add --no-iso to also drop the
+             isochronous audio, which is >99 % of the bytes of a real capture
 
   --vid/--pid/--bus/--dev restrict everything to matching devices.  --vid/--pid
   need the descriptor to be inside the capture (it is right after enumeration).
+
+  NOTE on filtering in Wireshark: `usb.idVendor`/`usb.idProduct` exist *only*
+  inside the device descriptor, so a display filter on them (plus "export
+  displayed packets") yields a capture with 1-2 packets and no traffic at all.
+  Filter on `usb.bus_id`/`usb.device_address` instead, or export everything and
+  let this tool select the device.
 
 Frame envelope (confirmed against Synapse, docs/barracudapro.md §8):
 
@@ -101,7 +111,7 @@ def parse_usbpcap(data, endian):
 def load_capture(path):
     """-> (interfaces, packets, meta).  Packets are USBPcap dicts + 't' (µs)."""
     ifaces, pkts, meta = [], [], {}
-    for btype, body, endian, _off, _blen in iter_blocks(path):
+    for btype, body, endian, boff, blen in iter_blocks(path):
         if btype == SHB:
             shb = meta.setdefault("shb", {})
             for code, val in _options(body, 16, endian):
@@ -122,8 +132,28 @@ def load_capture(path):
                 continue
             h = parse_usbpcap(data, endian)
             h["t"] = t
+            h["_off"], h["_blen"] = boff, blen       # for --extract
             pkts.append(h)
     return ifaces, pkts, meta
+
+
+def extract(path, out_path, keep_offsets):
+    """Copy a pcapng, keeping the section/interface blocks and the given packets.
+
+    USBPcap writes one pcapng block per packet, so a filtered file is just the
+    untouched bytes of the blocks we want - no re-encoding, no data loss.  The
+    device descriptors travel with the device's own control transfers, so the
+    result still identifies itself."""
+    data = open(path, "rb").read()
+    n = 0
+    with open(out_path, "wb") as out:
+        for btype, _body, _endian, boff, blen in iter_blocks(path):
+            if btype in (SHB, IDB):
+                out.write(data[boff:boff + blen])
+            elif boff in keep_offsets:
+                out.write(data[boff:boff + blen])
+                n += 1
+    return n
 
 
 # ------------------------------------------------------------- descriptors ---
@@ -230,6 +260,7 @@ def main():
     if not argv or argv[0].startswith("-"):
         sys.exit("usage: pcapng_razer.py CAPTURE.pcapng"
                  " [--summary] [--devices] [--frames] [--dump]"
+                 " [--extract OUT.pcapng]"
                  " [--vid HEX] [--pid HEX] [--bus N] [--dev N]")
     path = argv.pop(0)
     filters = {}
@@ -282,6 +313,28 @@ def main():
     print("          %.3f s, %d packets, %d interface(s), linktype %s"
           % (span, len(pkts), len(ifaces), ifaces[0]["linktype"] if ifaces else "?"))
 
+    if not [p for p in pkts if p["xfer"] != 2]:
+        print("\n# hint: this capture contains only control transfers (device or "
+              "config descriptors) and no interrupt/iso/bulk traffic at all.\n"
+              "#       That is what Wireshark's 'Export Specified Packets -> "
+              "Displayed' does with a `usb.idVendor`/`usb.idProduct` display\n"
+              "#       filter: those two fields exist only inside the device "
+              "descriptor, so nothing else can match them.\n"
+              "#       Export *all* packets, filter on `usb.bus_id`/ "
+              "`usb.device_address` (present on every packet), or let USBPcap's\n"
+              "#       own per-device capture filter do the selection.")
+
+    if "--extract" in argv:
+        i = argv.index("--extract")
+        if i + 1 >= len(argv):
+            sys.exit("error: --extract needs an output file")
+        out = argv[i + 1]
+        keep = {p["_off"] for p in pkts
+                if selected(p) and not ("--no-iso" in argv and p["xfer"] == 0)}
+        n = extract(path, out, keep)
+        print("          extracted %d of %d packets -> %s (whole blocks, lossless)"
+              % (n, len(pkts), out))
+
     if not ({"--devices", "--frames", "--dump"} & set(argv)):
         print("\n=== devices ===")
         for key in sorted({(p["bus"], p["dev"]) for p in pkts}):
@@ -304,7 +357,7 @@ def main():
                       % ((min(t) - t0) / 1e6, (max(t) - t0) / 1e6))
 
     if "--devices" in argv:
-        for key in sorted(configs):
+        for key in sorted(set(ids) | set(configs)):
             if not match(key):
                 continue
             dd = ids.get(key)
@@ -312,8 +365,12 @@ def main():
             if dd:
                 print("DEVICE  %04x:%04x  bcdUSB=%04x class=%02x configs=%d"
                       % (dd["vid"], dd["pid"], dd["bcdUSB"], dd["class"], dd["numconfig"]))
-            for row in configs[key]:
-                print(row)
+            if key in configs:
+                for row in configs[key]:
+                    print(row)
+            else:
+                print("(no configuration descriptor in this capture - was it "
+                      "exported with a usb.idVendor/usb.idProduct filter?)")
 
     if "--frames" in argv:
         print("\n=== PA/PI frames ===")
