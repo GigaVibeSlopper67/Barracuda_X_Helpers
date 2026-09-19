@@ -33,8 +33,10 @@ def main():
                   f"(poll {interval:g} s, Ctrl-C to quit)")
             try:
                 s = read_state()
+                mv = s['millivolts']
+                mv_txt = f"  \x1b[36m{mv} mV\x1b[0m" if mv is not None else ""
                 print(f"\n  {color(s['percent'])}{s['percent']:3d} %{RESET}  "
-                      f"{bar(s['percent'])}  \x1b[36m{s['millivolts']} mV\x1b[0m  {s['status']}\n")
+                      f"{bar(s['percent'])}{mv_txt}  {s['status']}\n")
                 print(f"  {DIM}{s['device']} · raw: {s['raw']}{RESET}")
             except (OSError, ValueError, FileNotFoundError) as e:
                 print(f"\n  waiting for dongle… ({e})")

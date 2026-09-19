@@ -72,7 +72,9 @@ def format_state_text(state):
         return "dongle not found"
     if kind == "empty":
         return "headset off / state unknown"
-    return f"{state['percent']}% ({state['millivolts']} mV, {state['status']})"
+    mv = state.get("millivolts")
+    mv_txt = f"{mv} mV, " if mv is not None else ""
+    return f"{state['percent']}% ({mv_txt}{state['status']})"
 
 
 def icon_candidates(state):

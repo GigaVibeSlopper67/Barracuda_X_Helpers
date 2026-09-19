@@ -1,9 +1,15 @@
-# Barracuda X Battery Meter — protocol notes & tools
+# Barracuda X / Pro Battery Meter — protocol notes & tools
 
 Battery level of the **Razer Barracuda X** (2.4 GHz USB dongle, `VID:PID 1532:0536`),
 read directly over HID on Linux. Reverse-engineered from sibling-device projects
 (Razer Nari dongle family) and validated live on this machine (Fedora,
 2026-09-18/19 — discharge, charge and fully-charged states all observed).
+
+The **Barracuda Pro 2.4** dongle (`1532:053a`) speaks a different, newer protocol
+("PA" frames over the interrupt endpoints) — see
+[Barracuda Pro 2.4 (053a) — second protocol](#barracuda-pro-24-1532053a--second-protocol)
+below. `barracuda_battery.py` auto-detects which dongle is present and picks the
+right reader.
 
 ## Usage
 
@@ -15,7 +21,8 @@ read directly over HID on Linux. Reverse-engineered from sibling-device projects
 ```
 
 The hidraw node is auto-detected by `HID_ID 0003:1532:0536` (also accepts the
-Barracuda X variants `0552` / `0574`), so it survives replugs and hidraw renumbering.
+Barracuda X variants `0552` / `0574` and the Barracuda Pro `053a`), so it survives
+replugs and hidraw renumbering.
 `~/.local/bin/barracuda-battery` is a symlink to `barracuda_battery.py`.
 
 ## How the protocol works
@@ -85,6 +92,62 @@ ff 0f 05 fe 12 04 1f 08 05 06 05 06 10 68 64 00 …
 * Bytes `[10..11]` look like a `[previous][current]` status pair: the
   discharging→charging capture reads `03 05`, charging→fully-charged reads
   `05 06` — `[11]` always mirrors `[9]`.
+
+## Barracuda Pro 2.4 (`1532:053a`) — second protocol
+
+The **Barracuda Pro 2.4** dongle (`1532:053a`, "Macronix Razer Barracuda Pro 2.4",
+USB interface 3, EP 3 OUT / EP 4 IN) does **not** speak the 0xFF feature-report
+protocol above — every feature-report transfer STALLs (EPIPE).  It speaks a
+newer "PA" frame protocol over the interrupt endpoints instead (report id 0x01,
+64-byte packets):
+
+    request:  01 80 <len> 50 41 <class> <arglen> <cmd> <args..>
+    response: 01 80 <len> 50 49 01 c0 <seq..> <data..>
+
+(`50 41` = "PA" request tag, `50 49` = "PI" response tag.)  Responses are
+QUEUED and only flushed when the next frame is written — a reader must send
+a throwaway frame to drain the queue.
+
+* class `0x08` = Synapse settings channel: read `03 <param> 00`, write
+  `04 <param> 00 <len> <val>`, multi-write `0d <param> 00 <n> <vals>…`.
+  Known params (from Synapse captures, openrazer issue #2009): ANC `0x12/0x92`,
+  EQ `0x1e/0x96/0x97`, mic monitor `0x18/0x98/0x99`, power-saving `0x2c/0xac`.
+  Unknown params answer silence; the console channel (below) answers
+  `"<cmd> is not a command"`.
+* class `0x02` = line-oriented firmware console.  In its "append mode"
+  (observed once) a payload of `\x08\x08\x08` + `bat\r\n` erases the frame
+  prefix from the console line buffer and runs the **`bat`** command; the
+  reply is a status frame (type 09):
+
+      01 00 26 00 09 88 <36-byte payload>
+
+      payload[4..7]   u32 charge state (0x07 observed while charging)
+      payload[8..11]  u32 charge level in percent (0x56 = 86 observed)
+      payload[12..]   u32 ms-timers (one matched the dongle uptime exactly)
+
+  The console is state-dependent and is the fragile part of this protocol:
+
+  - fresh after a replug it runs in **data mode**: the payload is consumed
+    as data, payload text never reaches the command line, and probes are
+    answered within a second with e.g. "P is not a valid command";
+  - a frame whose `arglen` exceeds its payload **wedges** the console
+    completely silent (all later frames are eaten as data) until the next
+    replug;
+  - in append mode `bat`/`adc` are accepted silently and produce the blob.
+
+  What switches the console into append mode is unknown.  Console replies
+  can queue for 2-13 s and are flushed by the next write.  `read_state()`
+  probes the `bat` line, a class-09 `cmd 04` query and the `bat` line again
+  with a longer window, scanning all replies for the blob marker
+  `26 00 09 88`; console errors are reported verbatim.  Full write-up with
+  evidence tables: `docs/barracudapro.md`.
+
+Other classes seen answering: `0x04`/`0x05`/`0x07`/`0x09`/`0x0a` (short
+diagnostic replies, contents not yet decoded); unknown console commands
+answer `"<x> is not a valid command"`, other unknown frames answer silence.
+`barracuda_battery.py` implements the probe sequence and parses
+percent/state from the blob; the state/percent semantics still deserve a
+flip test (unplug the charger and compare consecutive blobs).
 
 ## Gotchas (read before building a tray)
 
@@ -158,3 +221,7 @@ click posts the current state as a transient notification.
 * github.com/indina853/NariMeter — field table (`[9]` status, `[12:13]` mV BE, `[14]` percent), Windows tray app
 * openrazer/openrazer PR #2373 — why the 053C's 90-byte protocol exists (and why it doesn't apply here)
 * openrazer issues #2295 / #2649 / #2704 — Barracuda X family device IDs (0536 / 0552 / 0574)
+* openrazer issue #2009 — Barracuda Pro support request; z3ntu's Synapse Wireshark
+  captures (re-uploaded 2026-07) are the source of the PA/PI frame protocol above
+* openrazer PR #2899 — BlackShark V3 X dongle console protocol (sibling "recent
+  audio device" firmware; battery via feature report 0x07, class 07 / cmd 80)
