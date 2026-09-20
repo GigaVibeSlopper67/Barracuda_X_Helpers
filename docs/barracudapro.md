@@ -72,8 +72,9 @@ response: 01 80 <len> 50 49 01 c0 <seq2> <ctr2> <data...>   ("PI" = 50 49)
   * known params (from Synapse captures): ANC **mode** `0x12`/`0x92`
     (`0x00` off · `0x0a` on · `0xff` ambient — all confirmed by toggling; the
     1–10 *level* is software/transient and never persisted), EQ
-    `0x1e`/`0x96`/`0x97`, sidetone `0x18` (0 off/1 on) + `0x19` (level,
-    ~`0x07`=50 % → ~`0x06`=40 %, writes `0x98`/`0x99`), power-saving
+    `0x1e`/`0x96`/`0x97`, sidetone `0x18` (0 off/1 on) + `0x19` (level, 0–15
+    scale = `floor(% × 15/100)`: 10→1, 40→6, 50→7, 80→12, 100→15, writes
+    `0x98`/`0x99`), power-saving
     `0x2c`/`0xac` (= timeout in minutes, `0x00` off · `0x0f`=15 · up to
     `0x3c`=60), link flag `0x20`.
   * **battery `0x21`** (read `03 21 00 00` → `0x5d` = 93, matching Synapse's UI
