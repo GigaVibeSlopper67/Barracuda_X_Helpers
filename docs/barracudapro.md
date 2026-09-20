@@ -3,7 +3,7 @@ Barracuda Pro Data:
 lsusb:
 Bus 007 Device 004: ID 1532:053a Razer USA, Ltd Razer Barracuda Pro 2.4
 Features:
-- ANC Modes: ANC ON - Ambient - OFF OFF
+- ANC Modes: ANC ON - Ambient - ANC OFF
 - Mute Button (Probably mechanical, I don't know)
 - Volume: Clicky wheel endless scroll, gives audio beep for lowest and highest point
 
@@ -60,8 +60,15 @@ response: 01 80 <len> 50 49 01 c0 <seq2> <ctr2> <data...>   ("PI" = 50 49)
   * known params (from Synapse captures): ANC `0x12`/`0x92`,
     EQ `0x1e`/`0x96`/`0x97`, mic monitor `0x18`/`0x98`/`0x99`,
     power-saving `0x2c`/`0xac`, link flag `0x20`.
-  * A sweep of all 256 read params found only `0x01` (answers 01) and `0x20`
-    (link flag) — **no battery parameter exists on class 0x08**.
+  * **battery `0x21`** (read `03 21 00 00` → `0x5d` = 93, matching Synapse's UI
+    2026-09-20), status byte `0x2a` (read just before `0x21`, value `0x00`
+    observed — mapping TBD), version string `0x00` (reply ends `...IN`).
+    These came from the bare-metal capture, not the earlier (wedged) sweep.
+* `0x0e` → `0x01` — status poll: request `02 e1 01` (class 0x0e), reply
+  `00 03 00 0e 88 ..` (class 0x01).  Synapse sent it ~20×/minute; the `88`
+  marker echoes the battery blob's `09 88`.  Opt-in: `--probe-status`.
+* class-08 `cmd 06` (`06 01 c2 03 f8 5f 04`) — periodic, byte-identical; looks
+  like a time-sync/keepalive, not battery.
 * `0x02` — line-oriented firmware console (see §3).
 * `0x09` — status channel; a `cmd 04` query returned the battery blob once
   (see §4).
@@ -149,10 +156,10 @@ traffic; only the console/class-09 query reads the battery.
 * `barracuda_battery.py` auto-detects the PID and dispatches:
   X family -> 0xFF feature report (percent [14], mV [12:14] BE, status [9]);
   Pro (053a) -> **only Synapse-shaped class-08 reads** (§8): the first frame is
-  the ANC read (param 0x12) that Synapse itself sends on connect. If that
-  answers, the reader looks for a battery parameter; if it stays silent the
-  reader raises a clear error and sends nothing else (silence to that frame is
-  the signature of the wedged state, §7). `millivolts` is `None` on the Pro.
+  the link-flag read (param 0x20) that reliably answers on a healthy dongle
+  (the ANC read 0x12 is flaky and was wrongly used as the liveness check). The
+  battery is class-08 `param 0x21` (percent, verified live 2026-09-20) with a
+  status byte on `0x2a`. `millivolts` is `None` on the Pro.
   `--sweep [LO-HI]` hunts for a class-08 battery parameter (anchor-gated,
   paced, aborts on silence) and `--legacy-console-probes` re-enables the old
   class-02/0x09 guesses, which have killed audio until a replug.
@@ -405,7 +412,7 @@ template: **`docs/barracudapro-runbook.md`**.
 
 | command | frames sent | status |
 |---|---|---|
-| `./barracuda_battery.py` (Pro dongle) | **one** class-08 read, param `0x12` (ANC) — byte-identical to Synapse's connect frame | verified on the wire (§8) |
+| `./barracuda_battery.py` (Pro dongle) | class-08 reads: link flag `0x20` (anchor) + `0x2a` (status) + `0x21` (battery) | battery verified live (92 %) |
 | `./barracuda_battery.py --sweep [LO-HI] [--pace S] [--dry-run]` | class-08 reads, paced 0.25 s, anchor-gated, aborts after 3 silences | safe shape, params unverified |
 | `./barracuda_battery.py --legacy-console-probes` | class-02 console `bat` + class-09 `cmd 04` | **prime suspect for the hangs** |
 
@@ -420,15 +427,18 @@ Two other fixes in the same pass:
 ### 9.2 Is the dongle wedged right now? (one-frame test)
 
 ```bash
-./barracuda_battery.py --sweep 12 --dry-run   # print the frame, send nothing
-./barracuda_battery.py --sweep 12             # anchor read + param 0x12
+./barracuda_battery.py --sweep 20 --dry-run   # print the frame, send nothing
+./barracuda_battery.py --sweep 20             # link-flag read (param 0x20)
 ```
 
-* `# anchor 0x12 -> 00 04 00 12 01 01 0a` → the channel is healthy;
-* pure silence → the wedged state of §7 (audio is dead too, only a replug
-  clears it).  Measured 2026-09-20 on this box immediately after a hang:
-  silence, on a dongle that was still enumerated (ALSA card 4 present) — the
-  wedge leaves the device on the bus but mute.
+* `# link 0x20 -> 00 04 00 20 01 01 01` (value 1 = linked) → the channel is
+  healthy;
+* pure silence → possibly wedged (§7).  **Correction (2026-09-20):** the
+  original anchor was the ANC read `0x12`, but that param is flaky — it can be
+  silent on a perfectly healthy dongle with audio still playing.  Silence to
+  `0x12` does NOT imply a wedge; `0x20` (link flag) is the reliable liveness
+  signal, and `0x21` (battery) is what we actually want.  A genuine wedge
+  (audio dead, still enumerated) is silent to everything, including `0x20`.
 
 ### 9.3 Next steps, in order
 
@@ -480,6 +490,7 @@ Two other fixes in the same pass:
 |---|---|---|---|---|---|
 | `Razer Synapse.pcapng` | `81cddc48…` | 2026-09-20 | 21.876 s | 5.0 MB | 7560 packets: dongle enumeration + full config descriptor, 2188 audio URBs, **all 22 class-08 PA/PI frames** (§8.3), and an unrelated QEMU HID device on the same hub |
 | `Razer Synapse new.pcapng` | `b773bec2…` | 2026-09-20 | 153.754 s | 448 B | **2 packets only** — two 18-byte device descriptors (t=0 and t=153.75), nothing else |
+| `third - bare metal windows.pcapng` | `b6ece373…` | 2026-09-20 | 163.348 s | 118.6 kB | 1446 packets, one root hub: dongle enumerated 3× (dev2/10/11), **272 PA/PI frames** — battery `0x21` = 93 (Synapse UI matched), status `0x2a`, version `0x00`, class-0x0e/0x01 poll, `cmd 06`; no isochronous audio |
 
 ### 10.1 What went wrong in the 448-byte capture
 

@@ -55,7 +55,9 @@ LINKTYPE_USBPCAP = 249
 
 XTRAN = {0: "iso", 1: "int", 2: "ctrl", 3: "bulk"}
 KIND = {0x01: "reply", 0x02: "event"}
-CMD = {0x03: "read", 0x04: "write"}
+CMD = {0x03: "read", 0x04: "write", 0x06: "set?"}
+CLASS = {0x01: "status", 0x02: "console", 0x08: "settings", 0x09: "status",
+         0x0E: "poll"}
 
 
 # ---------------------------------------------------------------- pcapng ---
@@ -233,8 +235,9 @@ def fmt_frame(p, t0=0.0):
     head = "t=%9.4f bus%d dev%d ep=%3d" % ((p["t"] - t0) / 1e6, p["bus"], p["dev"], p["ep"])
     if not f:
         return head + "  (not a PA/PI frame)"
-    txt = "%s  %s len=%02x class=%02x" % (head, "PA->" if f["dir"] == "req" else "PI<-",
-                                          f["len"], f["class"])
+    txt = "%s  %s len=%02x class=%02x(%s)" % (head, "PA->" if f["dir"] == "req" else "PI<-",
+                                              f["len"], f["class"],
+                                              CLASS.get(f["class"], "?"))
     if f["dir"] == "req":
         txt += " arglen=%02x" % f["arglen"]
         if "cmd" in f:
@@ -346,7 +349,7 @@ def main():
             sub = [p for p in pkts if (p["bus"], p["dev"]) == key]
             kinds = {}
             for p in sub:
-                k = (XTRAN.get(p["xfer"], p["xfer"]), p["ep"])
+                k = (XTRAN.get(p["xfer"]) or "x%02x" % p["xfer"], p["ep"])
                 kinds[k] = kinds.get(k, 0) + 1
             t = [p["t"] for p in sub if p["t"]]
             print("bus%d dev%d  %s" % (key[0], key[1], name))

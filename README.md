@@ -124,6 +124,13 @@ how our probes read (and of a wedged parser after a malformed frame).
   next poll, and a write **ack reports `value = 00`**, not the written value.
   Unknown params answer silence; the console channel (below) answers
   `"<cmd> is not a command"`.
+
+  **Battery is class-08 `param 0x21`** (`03 21 00 00`): the bare-metal capture
+  (2026-09-20) read `0x5d` = 93 exactly when Synapse's UI showed 93 %.  Read
+  immediately before it, `param 0x2a` (value `0x00` observed) is the charge/
+  status byte — mapping still TBD, use `--watch` to settle it.  `param 0x00`
+  returns a version/identifier string (ends `...IN`).  `read_state()` now reads
+  `0x2a` + `0x21` and reports percent directly.
 * class `0x02` = line-oriented firmware console.  In its "append mode"
   (observed once) a payload of `\x08\x08\x08` + `bat\r\n` erases the frame
   prefix from the console line buffer and runs the **`bat`** command; the
@@ -158,20 +165,24 @@ how our probes read (and of a wedged parser after a malformed frame).
   and the class-02/class-09 probes are the prime suspect — Synapse never sends
   them.  They are opt-in now (`--legacy-console-probes`); the default path only
   sends class-08 reads that are byte-identical to Synapse's own traffic, and the
-  first frame is the ANC read (param `0x12`) that decides whether the dongle is
+  first frame is the link-flag read (param `0x20`) that decides whether the dongle is
   answering at all:
 
   ```bash
+  ./barracuda_battery.py                          # battery percent (param 0x21)
+  ./barracuda_battery.py --watch [SECONDS]        # map 0x2a/0x21 live
+  ./barracuda_battery.py --info                   # version string (param 0x00)
+  ./barracuda_battery.py --probe-status           # class-0x0e poll (opt-in)
   ./barracuda_battery.py --sweep 12               # is the channel alive?
   ./barracuda_battery.py --sweep                  # hunt for a battery param
-  ./barracuda_battery.py --sweep 12 --dry-run     # print the frame, send nothing
   ./barracuda_battery.py --legacy-console-probes  # the old, risky probes
   ```
 
   Silence to that anchor read is the signature of the wedged state (audio dead,
-  device still enumerated): replug the dongle.  No battery parameter is known on
-  class 0x08 yet, so `read_state()` says exactly that; `docs/barracudapro.md`
-  §8.5/§9 has the Windows capture recipe that would settle it.
+  device still enumerated): replug the dongle.  Battery is class-08 `param 0x21`
+  (percent, verified against Synapse) with status on `0x2a`; `--watch` maps the
+  status byte, `--info` reads the version, `--probe-status` probes the class-0x0e
+  poll channel.
 
   **Next round, step by step — including what to capture in Windows and what to
   look for: [`docs/barracudapro-runbook.md`](docs/barracudapro-runbook.md).**

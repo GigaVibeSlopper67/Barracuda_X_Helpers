@@ -29,9 +29,11 @@ Findings go back into `barracudapro.md` (§2 classes/params, §4 blob layout,
    reads (§8.2/§8.3).
 2. **One frame at a time, paced.**  ≥ 0.25 s between reads, never a burst.  The
    tools already pace (`--sweep`, `--pace`).
-3. **Anchor first.**  Every session starts by reading param `0x12` (ANC) — the
-   very frame Synapse sends when it opens the device.  No answer ⇒ the dongle is
-   wedged: **stop, replug, restart** (§9.2).  Never keep probing a silent dongle.
+3. **Anchor first.**  Every session starts by reading param `0x20` (link flag) —
+   the reliable liveness check.  The ANC param `0x12` is flaky (silent even on a
+   healthy dongle with audio playing), so it is NOT the anchor.  No answer to
+   `0x20` ⇒ the dongle may be wedged: **stop, replug, restart** (§9.2).  Never
+   keep probing a silent dongle.
 4. **Do not send class `0x02` / `0x09`** except in track C.  Synapse never uses
    them, they are the prime suspect for the hangs, and the console is
    state-dependent.  If they are ever sent: `arglen` must equal the payload
