@@ -69,14 +69,24 @@ response: 01 80 <len> 50 49 01 c0 <seq2> <ctr2> <data...>   ("PI" = 50 49)
   * read  : `03 <param> 00 <pad..>`
   * write : `04 <param> 00 <len> <val..>`
   * multi : `0d <param> 00 <n> <vals..>`
-  * known params (from Synapse captures): ANC `0x12`/`0x92`,
-    EQ `0x1e`/`0x96`/`0x97`, mic monitor `0x18`/`0x98`/`0x99`,
+  * known params (from Synapse captures): ANC **mode** `0x12`/`0x92`
+    (`0x00` off · `0x0a` on · `0xff` ambient — all confirmed by toggling; the
+    1–10 *level* is software/transient and never persisted), EQ
+    `0x1e`/`0x96`/`0x97`, mic monitor `0x18`/`0x98`/`0x99`,
     power-saving `0x2c`/`0xac`, link flag `0x20`.
   * **battery `0x21`** (read `03 21 00 00` → `0x5d` = 93, matching Synapse's UI
     2026-09-20), status byte `0x2a` = charge state (`0x00` on battery, `0x01`
     charging — verified by plug/unplug), version string `0x00` (reply ends
     `...IN`).  These came from the bare-metal capture, not the earlier (wedged)
     sweep.
+  * **Not on USB (software DSP in Synapse)** — THX↔Stereo spatial, Bass Boost,
+    Mic Noise Cancellation, and Volume.  Confirmed by the fourth capture
+    (2026-09-20): toggling each produced *zero* frames — no class-08 write, no
+    audio-class control transfer.  Bass Boost was further confirmed by setting
+    it to 60 % and reading no param change on Linux.  Synapse processes these
+    in its own audio engine, so they never reach the dongle and are out of
+    scope for USB RE (they are, correspondingly, the things you can set from
+    Linux instead).
 * `0x0e` → `0x01` — status poll: request `02 e1 01` (class 0x0e), reply
   `00 03 00 0e 88 ..` (class 0x01).  Synapse sent it ~20×/minute; the `88`
   marker echoes the battery blob's `09 88`.  Opt-in: `--probe-status`.
@@ -512,6 +522,7 @@ Two other fixes in the same pass:
 | `Razer Synapse.pcapng` | `81cddc48…` | 2026-09-20 | 21.876 s | 5.0 MB | 7560 packets: dongle enumeration + full config descriptor, 2188 audio URBs, **all 22 class-08 PA/PI frames** (§8.3), and an unrelated QEMU HID device on the same hub |
 | `Razer Synapse new.pcapng` | `b773bec2…` | 2026-09-20 | 153.754 s | 448 B | **2 packets only** — two 18-byte device descriptors (t=0 and t=153.75), nothing else |
 | `third - bare metal windows.pcapng` | `b6ece373…` | 2026-09-20 | 163.348 s | 118.6 kB | 1446 packets, one root hub: dongle enumerated 3× (dev2/10/11), **272 PA/PI frames** — battery `0x21` = 93 (Synapse UI matched), status `0x2a`, version `0x00`, class-0x0e/0x01 poll, `cmd 06`; no isochronous audio |
+| `fourth - bare metal windows.pcapng` | `0e02344f…` | 2026-09-20 | 86.768 s | 33.6 kB | 446 packets: dongle = enumeration + one `SET_INTERFACE` + 6 ANC (`0x12`) polls.  **Proof that THX↔Stereo / Bass / Mic-NC / Volume are software DSP** — toggling them produced no frames at all |
 
 ### 10.1 What went wrong in the 448-byte capture
 

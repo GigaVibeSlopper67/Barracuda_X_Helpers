@@ -69,6 +69,10 @@ CLI:
                                     probe the class-0x0e status poll (opt-in)
   barracuda_battery.py --features
                                     warm up + read all feature-candidate params
+  barracuda_battery.py --set-anc off|on|ambient
+                                    write ANC mode (param 0x92), verify by read
+  barracuda_battery.py --set 0xPARAM 0xVAL
+                                    write a class-08 param (read param + 0x80)
   barracuda_battery.py --legacy-console-probes
                                     send the old class-02/0x09 guesses (can
                                     kill audio until a replug)
@@ -222,6 +226,7 @@ PRO_SWEEP_RANGE = (0x00, 0x7F)   # read-side params Synapse's UI talks to
 PRO_BATTERY_PARAMS = (0x21,)     # battery percent - verified vs Synapse UI (0x5d = 93)
 PRO_STATUS_PARAM = 0x2A          # charge-state byte, read right before 0x21
 PRO_VERSION_PARAM = 0x00         # firmware/version string (reply ends "...IN")
+PRO_VOLTAGE_PARAM = 0x33         # candidate battery voltage (value * 20 = mV), unconfirmed
 # class-08 param 0x2a -> charge state.  0x00 = on battery, 0x01 = charging
 # (verified 2026-09-20 by plugging/unplugging the charger).  A "fully charged"
 # value has not been observed yet - watch for it once it sits at 100 % on the
@@ -231,29 +236,33 @@ PRO_STATUS = {
     0x01: "charging",
 }
 
+# class-08 param 0x12 (ANC mode) values - all three confirmed by toggling.
+PRO_ANC_VALUES = {"off": 0x00, "on": 0x0A, "ambient": 0xFF}
+
 # Feature-candidate class-08 read params with best-guess labels.  Discovered by
-# the 2026-09-20 warm-up + full sweep; the distinctive values seen then were
-# 0x12=10, 0x1e=10, 0x33=199, 0x57=13, 0x25=2.  Labels are UNCONFIRMED - toggle
-# each feature in Synapse and diff (--features before/after) to pin them down.
+# the 2026-09-20 warm-up + full sweep.  NOTE: THX/Stereo, Bass Boost, Mic Noise
+# Cancellation and Volume turned out to be *software DSP in Synapse* (the fourth
+# capture shows zero frames for them), so they are NOT here - these are the
+# dongle-side params only.  `0x33` drifts with battery (voltage candidate).
 PRO_FEATURES = [
-    (0x12, "ANC strength (1-10)"),
+    (0x12, "ANC mode (0 off / 10 on / 255 ambient)"),
     (0x1E, "audio EQ"),
     (0x16, "EQ 2nd param"),
     (0x17, "EQ 3rd param"),
     (0x18, "mic monitor / sidetone"),
     (0x2C, "power saving on/off"),
     (0x2D, "power-saving timeout"),
-    (0x56, "toggle (THX / bass?)"),
-    (0x57, "value (mic-NC / timeout?)"),
-    (0x33, "0-255 value (bass?)"),
-    (0x25, "value"),
-    (0x13, "value"),
-    (0x14, "value"),
-    (0x19, "value"),
-    (0x26, "value"),
-    (0x27, "value"),
-    (0x55, "value"),
-    (0x58, "value"),
+    (0x56, "unknown hardware param"),
+    (0x57, "unknown hardware param"),
+    (0x33, "dynamic (battery voltage?)"),
+    (0x25, "unknown"),
+    (0x13, "unknown"),
+    (0x14, "unknown"),
+    (0x19, "unknown"),
+    (0x26, "unknown"),
+    (0x27, "unknown"),
+    (0x55, "unknown"),
+    (0x58, "unknown"),
 ]
 
 
@@ -354,6 +363,7 @@ def _pro_read_state(dev, console=False):
                   file=sys.stderr)
         if console:
             return _pro_console_probe(dev)
+        _pro_unlock(fd)   # unlock battery/status reads (class-0x0e poll)
         # status (0x2a) first, then percent (0x21) - Synapse's own read order.
         status_reply, _ = _pro_query(fd, PRO_STATUS_PARAM, 0.5)
         for param in PRO_BATTERY_PARAMS:
@@ -599,19 +609,24 @@ def _pro_watch(dev, interval=5.0, count=None):
             return 1
         print(f"# watching {dev} every {interval:g} s - plug/unplug the charger, "
               "power the headset off/on. Ctrl-C quits.")
+        _pro_unlock(fd)   # unlock battery/status reads
         n = 0
         while count is None or n < count:
             st, _ = _pro_query(fd, PRO_STATUS_PARAM, 0.5)
             pct, _ = _pro_query(fd, PRO_BATTERY_PARAMS[0], 0.5)
+            v33, _ = _pro_query(fd, PRO_VOLTAGE_PARAM, 0.5)
             sv = st["value"] if st else None
             pv = pct["value"] if pct else None
+            vv = v33["value"] if v33 else None
             status = ("unknown" if sv is None
                       else PRO_STATUS.get(sv, f"0x{sv:02x} (unmapped)"))
-            print("%s  status=%-20s  battery=%s%%   (0x2a=%s  0x21=%s)"
+            print("%s  status=%-20s  battery=%s%%   (0x2a=%s 0x21=%s  0x33=%s -> ~%s mV)"
                   % (time.strftime("%H:%M:%S"), status,
                      pv if pv is not None else "-",
                      ("0x%02x" % sv) if sv is not None else "-",
-                     ("0x%02x" % pv) if pv is not None else "-"))
+                     ("0x%02x" % pv) if pv is not None else "-",
+                     ("%d" % vv) if vv is not None else "-",
+                     (vv * 20) if vv is not None else "-"))
             n += 1
             if count is not None and n >= count:
                 break
@@ -631,6 +646,7 @@ def _pro_info(dev):
             print("error: link read (param 0x20) got no answer - dongle looks "
                   "wedged; replug and retry", file=sys.stderr)
             return 1
+        _pro_unlock(fd)
         reply = None
         for _ in range(3):
             reply, _ = _pro_query(fd, PRO_VERSION_PARAM, 0.5)
@@ -690,6 +706,17 @@ def _pro_status_probe(dev, count=4, interval=1.0):
         os.close(fd)
 
 
+def _pro_unlock(fd):
+    """Unlock the battery/status reads with a class-0x0e poll.
+
+    On a cold dongle (e.g. right after a Synapse session) `0x21`/`0x2a` answer
+    silence until this poll runs; `0x20` (link) still answers cold.  This is
+    the minimal unlock - the `d6` writes are NOT needed for battery/status
+    (verified 2026-09-20)."""
+    os.write(fd, _frame(0x0E, bytes([0x02, 0xE1, 0x01]), arglen=8))
+    time.sleep(0.3)
+
+
 def _pro_warmup(fd):
     """Run Synapse's open sequence to unlock the class-08 settings channel.
 
@@ -747,6 +774,58 @@ def _pro_features(dev):
         os.close(fd)
 
 
+def _pro_set(dev, param, value):
+    """Write a class-08 param (write side = read param + 0x80) and read it back.
+
+    The write ack reports value 0x00, so we verify by reading the param back.
+    Synapse-identical class-08 write, audio-safe (verified 2026-09-20)."""
+    fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        _pro_drain(fd)
+        _pro_unlock(fd)
+        os.write(fd, _frame(0x08, bytes([0x04, param | 0x80, 0x00, 0x01, value]),
+                            arglen=8))
+        time.sleep(0.4)
+        r, _ = _pro_query(fd, param, 0.5, attempts=2)
+        return r["value"] if r and r["value"] is not None else None
+    finally:
+        os.close(fd)
+
+
+def _set_anc_cli(dev, argv):
+    """`--set-anc off|on|ambient` — write ANC mode (param 0x92), verify by read."""
+    i = argv.index("--set-anc")
+    mode = argv[i + 1] if i + 1 < len(argv) else None
+    if mode not in PRO_ANC_VALUES:
+        sys.exit("error: --set-anc needs one of: "
+                 + ", ".join(sorted(PRO_ANC_VALUES)))
+    got = _pro_set(_pro_dev(dev), 0x12, PRO_ANC_VALUES[mode])
+    if got is None:
+        sys.exit("error: no answer reading 0x12 back after the write")
+    print(f"ANC mode -> {mode} (0x12 = 0x{got:02x})")
+    return 0
+
+
+def _set_cli(dev, argv):
+    """`--set 0xPARAM 0xVAL` — write a class-08 param, verify by read."""
+    i = argv.index("--set")
+    if i + 2 >= len(argv):
+        sys.exit("error: --set needs <param> <value> in hex (e.g. --set 12 0a)")
+    try:
+        param = int(argv[i + 1], 16)
+        value = int(argv[i + 2], 16)
+    except ValueError:
+        sys.exit("error: --set param/value must be hex")
+    if not 0 <= param <= 0x7F or not 0 <= value <= 0xFF:
+        sys.exit("error: --set param must be 0x00-0x7f, value 0x00-0xff")
+    got = _pro_set(_pro_dev(dev), param, value)
+    if got is None:
+        print(f"wrote 0x{param:02x} = 0x{value:02x} (no readback)")
+    else:
+        print(f"wrote 0x{param:02x} = 0x{value:02x} -> read back 0x{got:02x}")
+    return 0
+
+
 def main():
     argv = sys.argv[1:]
     dev = None
@@ -760,6 +839,10 @@ def main():
         sys.exit(_pro_info(_pro_dev(dev)))
     if "--features" in argv:
         sys.exit(_pro_features(_pro_dev(dev)))
+    if "--set-anc" in argv:
+        sys.exit(_set_anc_cli(dev, argv))
+    if "--set" in argv:
+        sys.exit(_set_cli(dev, argv))
     if "--probe-status" in argv:
         sys.exit(_pro_status_probe(_pro_dev(dev)))
     if "--watch" in argv:
