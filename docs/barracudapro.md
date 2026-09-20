@@ -7,6 +7,18 @@ Features:
 - Mute Button (Probably mechanical, I don't know)
 - Volume: Clicky wheel endless scroll, gives audio beep for lowest and highest point
 
+Interesting Razer Synapse Features:
+- Mic Monitoring (Side Tone)
+- Switch between Stereo and THX spatial audio
+- ANC Values from 1 to 10
+- Bass Boost ON/OFF and 100 steps
+- Mic Noise cancellation
+- Power Saving ON/OFF and set the turnoff between 15 and 60 Minutes
+
+Features that might not be needed because they culd be set on Linux
+- Mic Equalizer -> Interesting to make the sound of the Mic Less Tinny (it is friendship-destroyingly tinny without any EQ tewaking!)
+- Audio Equalizer
+
 ---
 
 # Reverse-engineering findings — Barracuda Pro 2.4 dongle (1532:053a)

@@ -335,13 +335,13 @@ def _pro_read_state(dev, console=False):
                 st = status_reply["value"] if status_reply else None
                 status = ("unknown" if st is None
                           else PRO_STATUS.get(st, f"0x{st:02x} (unmapped)"))
-                raw = status_reply["data"] if status_reply else b""
-                raw += b" " + reply["data"]
+                raw = (status_reply["data"] if status_reply else b"").hex(" ")
+                raw += " | " + reply["data"].hex(" ")
                 return {
                     "percent": reply["value"],
                     "millivolts": None,
                     "status": status,
-                    "raw": raw.hex(" "),
+                    "raw": raw,
                     "device": dev,
                     "pid": 0x053A,
                     "unix_time": time.time(),
