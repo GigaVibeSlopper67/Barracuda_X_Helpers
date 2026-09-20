@@ -127,10 +127,10 @@ how our probes read (and of a wedged parser after a malformed frame).
 
   **Battery is class-08 `param 0x21`** (`03 21 00 00`): the bare-metal capture
   (2026-09-20) read `0x5d` = 93 exactly when Synapse's UI showed 93 %.  Read
-  immediately before it, `param 0x2a` (value `0x00` observed) is the charge/
-  status byte — mapping still TBD, use `--watch` to settle it.  `param 0x00`
-  returns a version/identifier string (ends `...IN`).  `read_state()` now reads
-  `0x2a` + `0x21` and reports percent directly.
+  immediately before it, `param 0x2a` is the charge state: `0x00` = on battery,
+  `0x01` = charging (verified by plugging/unplugging the charger).  `param 0x00`
+  returns a version/identifier string (ends `...IN`).  `read_state()` reads
+  `0x2a` + `0x21` and reports percent + charge state directly.
 * class `0x02` = line-oriented firmware console.  In its "append mode"
   (observed once) a payload of `\x08\x08\x08` + `bat\r\n` erases the frame
   prefix from the console line buffer and runs the **`bat`** command; the

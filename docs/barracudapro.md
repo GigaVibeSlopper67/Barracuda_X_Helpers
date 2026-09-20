@@ -61,9 +61,10 @@ response: 01 80 <len> 50 49 01 c0 <seq2> <ctr2> <data...>   ("PI" = 50 49)
     EQ `0x1e`/`0x96`/`0x97`, mic monitor `0x18`/`0x98`/`0x99`,
     power-saving `0x2c`/`0xac`, link flag `0x20`.
   * **battery `0x21`** (read `03 21 00 00` → `0x5d` = 93, matching Synapse's UI
-    2026-09-20), status byte `0x2a` (read just before `0x21`, value `0x00`
-    observed — mapping TBD), version string `0x00` (reply ends `...IN`).
-    These came from the bare-metal capture, not the earlier (wedged) sweep.
+    2026-09-20), status byte `0x2a` = charge state (`0x00` on battery, `0x01`
+    charging — verified by plug/unplug), version string `0x00` (reply ends
+    `...IN`).  These came from the bare-metal capture, not the earlier (wedged)
+    sweep.
 * `0x0e` → `0x01` — status poll: request `02 e1 01` (class 0x0e), reply
   `00 03 00 0e 88 ..` (class 0x01).  Synapse sent it ~20×/minute; the `88`
   marker echoes the battery blob's `09 88`.  Opt-in: `--probe-status`.

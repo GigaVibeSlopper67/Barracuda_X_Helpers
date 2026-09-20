@@ -31,7 +31,8 @@ Protocol (reverse-engineered; same Macronix dongle generation as the Razer Nari)
   ever observed using (read `03 <param> 00 00`, write `04 <param> 00 <len>
   <val>`), so it is the only one this reader sends by default.  Battery
   percent is class-08 param 0x21 (verified against Synapse's UI: 0x5d = 93%
-  in the bare-metal capture) with a status byte on param 0x2a (mapping TBD).
+  in the bare-metal capture) with a charge-state byte on param 0x2a (0x00
+  discharging, 0x01 charging).
   A fresh sweep with Synapse-shaped frames is `--sweep`.
   class 0x02 = line-oriented debug console, class 0x09 = status channel.  Both
   have returned the 36-byte battery status frame:
@@ -217,10 +218,16 @@ def _console_line(buf):
 PRO_ANCHOR_PARAM = 0x20          # link flag - reliable liveness check (0x12 ANC is flaky)
 PRO_SWEEP_RANGE = (0x00, 0x7F)   # read-side params Synapse's UI talks to
 PRO_BATTERY_PARAMS = (0x21,)     # battery percent - verified vs Synapse UI (0x5d = 93)
-PRO_STATUS_PARAM = 0x2A          # status byte, read right before 0x21 (mapping TBD)
+PRO_STATUS_PARAM = 0x2A          # charge-state byte, read right before 0x21
 PRO_VERSION_PARAM = 0x00         # firmware/version string (reply ends "...IN")
-# class-08 param 0x2a -> human label; empty until --watch maps a charge flip
-PRO_STATUS = {}
+# class-08 param 0x2a -> charge state.  0x00 = on battery, 0x01 = charging
+# (verified 2026-09-20 by plugging/unplugging the charger).  A "fully charged"
+# value has not been observed yet - watch for it once it sits at 100 % on the
+# charger, and add it here.
+PRO_STATUS = {
+    0x00: "discharging",
+    0x01: "charging",
+}
 
 
 def _pro_read_frame(param):
@@ -302,9 +309,9 @@ def _pro_read_state(dev, console=False):
       * the class-02/class-09 probes that have killed audio are never sent
         unless `console=True` (CLI only: --legacy-console-probes).
 
-    Battery percent is class-08 param 0x21 and the status byte is 0x2a (both
-    verified against Synapse's bare-metal capture); the 0x2a mapping is still
-    provisional until --watch observes a charge flip."""
+    Battery percent is class-08 param 0x21 and the charge state is 0x2a (0x00
+    discharging, 0x01 charging) - both verified against Synapse's bare-metal
+    capture and a live plug/unplug of the charger."""
     fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
     try:
         _pro_drain(fd)
