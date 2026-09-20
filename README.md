@@ -119,8 +119,8 @@ how our probes read (and of a wedged parser after a malformed frame).
   `04 <param> 00 <len> <val>`, multi-write `0d <param> 00 <n> <vals>…`.
   Known params (from Synapse captures, openrazer issue #2009): ANC *mode*
   `0x12/0x92` (`0x00` off · `0x0a` on · `0xff` ambient; the 1–10 *level* is
-  software/transient), EQ `0x1e/0x96/0x97`, mic monitor `0x18/0x98/0x99`,
-  power-saving `0x2c/0xac`.  **Not on USB** (software DSP in Synapse — the
+  software/transient), EQ `0x1e/0x96/0x97`, sidetone `0x18` (on/off) + `0x19`
+  (level), power-saving `0x2c/0xac` (timeout in minutes: 0 off, 15–60).  **Not on USB** (software DSP in Synapse — the
   fourth capture shows zero frames when toggled): THX↔Stereo, Bass Boost, Mic
   Noise Cancellation, Volume.
   The 2026-09-20 capture exercised `0x12`/`0x92` and `0x2c`/`0xac`: the write
