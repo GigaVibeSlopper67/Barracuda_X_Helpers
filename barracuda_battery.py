@@ -63,7 +63,7 @@ CLI:
                                     look for a class-08 battery param with
                                     Synapse-shaped reads (default 0x00-0x7f)
   barracuda_battery.py --watch [SECONDS]
-                                    live 0x2a/0x21 reads to map the status byte
+                                    live battery/status/voltage (0x33) reads
   barracuda_battery.py --info        read the version/identifier param (0x00)
   barracuda_battery.py --probe-status
                                     probe the class-0x0e status poll (opt-in)
@@ -71,6 +71,10 @@ CLI:
                                     warm up + read all feature-candidate params
   barracuda_battery.py --set-anc off|on|ambient
                                     write ANC mode (param 0x92), verify by read
+  barracuda_battery.py --set-sidetone 0-100
+                                    set sidetone level (percent -> 0-15 scale)
+  barracuda_battery.py --set-power-save 0-60
+                                    set power-saving timeout (min, 0 = off)
   barracuda_battery.py --set 0xPARAM 0xVAL
                                     write a class-08 param (read param + 0x80)
   barracuda_battery.py --legacy-console-probes
@@ -826,6 +830,58 @@ def _set_cli(dev, argv):
     return 0
 
 
+def _set_sidetone_cli(dev, argv):
+    """`--set-sidetone 0-100` — set sidetone level (percent); 0 turns it off.
+
+    Synapse's 0-100 % maps to the dongle's 0-15 scale via `floor(% × 15/100)`;
+    this writes 0x18 (on/off) and 0x19 (level) — 0% sets 0x18 = 0 (off), any
+    other value sets 0x18 = 1 (on) — then reads both back."""
+    i = argv.index("--set-sidetone")
+    txt = argv[i + 1] if i + 1 < len(argv) else None
+    if txt is None:
+        sys.exit("error: --set-sidetone needs a level 0-100 (e.g. --set-sidetone 60)")
+    try:
+        pct = int(txt)
+    except ValueError:
+        sys.exit("error: --set-sidetone level must be 0-100")
+    if not 0 <= pct <= 100:
+        sys.exit("error: --set-sidetone level must be 0-100")
+    d = _pro_dev(dev)
+    if pct == 0:
+        onv = _pro_set(d, 0x18, 0x00)               # 0% -> turn sidetone off
+        lvv = _pro_set(d, 0x19, 0x00)               # and zero the level
+    else:
+        onv = _pro_set(d, 0x18, 0x01)               # turn sidetone on
+        lvv = _pro_set(d, 0x19, pct * 15 // 100)    # set level (floor(% × 15/100))
+    if onv is None or lvv is None:
+        sys.exit("error: no answer reading sidetone back after the write")
+    print(f"sidetone -> {pct}%  (0x18={onv}, 0x19={lvv} [0x{lvv:02x}])")
+    return 0
+
+
+def _set_power_save_cli(dev, argv):
+    """`--set-power-save 0-60` — set power-saving timeout (minutes); 0 = off.
+
+    The dongle stores the timeout directly in minutes (0x2c: 0 off, 15-60 min).
+    Writes 0x2c and reads it back."""
+    i = argv.index("--set-power-save")
+    txt = argv[i + 1] if i + 1 < len(argv) else None
+    if txt is None:
+        sys.exit("error: --set-power-save needs minutes 0-60 (0 = off)")
+    try:
+        mins = int(txt)
+    except ValueError:
+        sys.exit("error: --set-power-save minutes must be 0-60")
+    if not 0 <= mins <= 60:
+        sys.exit("error: --set-power-save minutes must be 0-60 (0 = off)")
+    d = _pro_dev(dev)
+    got = _pro_set(d, 0x2C, mins)
+    if got is None:
+        sys.exit("error: no answer reading 0x2c back after the write")
+    print(f"power saving -> {'off' if mins == 0 else f'{mins} min'}  (0x2c = {got})")
+    return 0
+
+
 def main():
     argv = sys.argv[1:]
     dev = None
@@ -841,6 +897,10 @@ def main():
         sys.exit(_pro_features(_pro_dev(dev)))
     if "--set-anc" in argv:
         sys.exit(_set_anc_cli(dev, argv))
+    if "--set-sidetone" in argv:
+        sys.exit(_set_sidetone_cli(dev, argv))
+    if "--set-power-save" in argv:
+        sys.exit(_set_power_save_cli(dev, argv))
     if "--set" in argv:
         sys.exit(_set_cli(dev, argv))
     if "--probe-status" in argv:

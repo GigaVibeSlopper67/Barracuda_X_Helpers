@@ -115,6 +115,22 @@ request, with two IN URBs kept pending and **no flush frame** — the "queued
 until the next write" behaviour we saw on Linux is most likely an artifact of
 how our probes read (and of a wedged parser after a malformed frame).
 
+### Params at a glance
+
+| param | r/w | meaning |
+|---|---|---|
+| `0x20` | read | link flag (`1` = linked) |
+| `0x21` | read | battery percent |
+| `0x2a` | read | charge state (`0x00` battery · `0x01` charging) |
+| `0x00` | read (flaky) | version string |
+| `0x12` / `0x92` | both | ANC mode (`0x00` off · `0x0a` on · `0xff` ambient) |
+| `0x18` / `0x98` | both | sidetone on/off |
+| `0x19` / `0x99` | both | sidetone level (0–15 = `floor(% × 15/100)`) |
+| `0x2c` / `0xac` | both | power-saving timeout (minutes, `0` off) |
+| `0x1e` / `0x96`/`0x97` | both | audio EQ |
+| `0x33` | read | battery voltage candidate (`×20` = mV, unconfirmed) |
+| `0x56` / `0x57` / `0x25` | read | unknown firmware state |
+
 * class `0x08` = Synapse settings channel: read `03 <param> 00 00`, write
   `04 <param> 00 <len> <val>`, multi-write `0d <param> 00 <n> <vals>…`.
   Known params (from Synapse captures, openrazer issue #2009): ANC *mode*
@@ -173,11 +189,15 @@ how our probes read (and of a wedged parser after a malformed frame).
   answering at all:
 
   ```bash
-  ./barracuda_battery.py                          # battery percent (param 0x21)
-  ./barracuda_battery.py --watch [SECONDS]        # map 0x2a/0x21 live
+  ./barracuda_battery.py                          # battery percent + charge state
+  ./barracuda_battery.py --features               # read every known param
+  ./barracuda_battery.py --watch [SECONDS]        # live battery/status/voltage
+  ./barracuda_battery.py --set-anc off|on|ambient # write ANC mode
+  ./barracuda_battery.py --set-sidetone 0-100     # write sidetone level (0 = off)
+  ./barracuda_battery.py --set-power-save 0-60    # write power-saving timeout (0 = off)
+  ./barracuda_battery.py --set 0xPARAM 0xVAL      # write any class-08 param
   ./barracuda_battery.py --info                   # version string (param 0x00)
   ./barracuda_battery.py --probe-status           # class-0x0e poll (opt-in)
-  ./barracuda_battery.py --sweep 12               # is the channel alive?
   ./barracuda_battery.py --sweep                  # hunt for a battery param
   ./barracuda_battery.py --legacy-console-probes  # the old, risky probes
   ```

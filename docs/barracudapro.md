@@ -438,8 +438,11 @@ template: **`docs/barracudapro-runbook.md`**.
 
 | command | frames sent | status |
 |---|---|---|
-| `./barracuda_battery.py` (Pro dongle) | class-08 reads: link flag `0x20` (anchor) + `0x2a` (status) + `0x21` (battery) | battery verified live (92 %) |
-| `./barracuda_battery.py --sweep [LO-HI] [--pace S] [--dry-run]` | class-08 reads, paced 0.25 s, anchor-gated, aborts after 3 silences | safe shape, params unverified |
+| `./barracuda_battery.py` (Pro dongle) | class-08 reads: link `0x20` + status `0x2a` + battery `0x21` (plus a class-0x0e unlock poll) | battery verified live |
+| `./barracuda_battery.py --features` | warm-up + read every known param | verified |
+| `./barracuda_battery.py --watch [S]` | unlock + paced `0x2a`/`0x21`/`0x33` reads | verified |
+| `./barracuda_battery.py --set-anc / --set-sidetone / --set-power-save / --set` | class-08 writes (`read param + 0x80`), verified by read-back | verified safe (writes don't kill audio) |
+| `./barracuda_battery.py --sweep [LO-HI] [--pace S] [--dry-run]` | class-08 reads, paced, anchor-gated, aborts after 3 silences | safe shape |
 | `./barracuda_battery.py --legacy-console-probes` | class-02 console `bat` + class-09 `cmd 04` | **prime suspect for the hangs** |
 
 **Safety note (2026-09-20):** a live *warm-up + full 128-param sweep* (the
