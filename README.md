@@ -269,6 +269,11 @@ desktop notifications on state transitions: `< 20 %` low, `< 10 %` critical
 and dongle un/re-plug. The empty-cache blob (`ff 01 00 …`, headset off) is
 treated as *unknown* and never reported as 0 %.
 
+The tray (and `barracuda-watch`) label the reading with the **detected model**
+from `read_state()["name"]` — the X variants report *Barracuda X* and a
+`053a` dongle reports *Barracuda Pro 2.4* — so menu, tooltip and notifications
+never claim the wrong headset.
+
 ```bash
 sudo dnf install python3-pyqt6          # Fedora; libnotify is already installed
 ./barracuda-tray                        # tray icon, 30 s poll

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Tiny live battery watch for the Razer Barracuda X. Usage: barracuda-watch [interval_sec]"""
+"""Tiny live battery watch for the Razer Barracuda (X / Pro). Usage: barracuda-watch [interval_sec]"""
 import os
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from barracuda_battery import read_state
+from barracuda_battery import device_name, read_state
 
 CLEAR, RESET, DIM = "\x1b[2J\x1b[H", "\x1b[0m", "\x1b[2m"
+DEFAULT_NAME = "Razer Barracuda"
 
 
 def color(p):
@@ -24,22 +25,29 @@ def main():
     sys.stdout.reconfigure(line_buffering=True)
     print("starting…")
     first = True
+    name = DEFAULT_NAME
     try:
         while True:
             if not first:
                 print(CLEAR, end="")
             first = False
-            print(f"Razer Barracuda X — {time.strftime('%H:%M:%S')}  "
-                  f"(poll {interval:g} s, Ctrl-C to quit)")
+            state, err = None, None
             try:
-                s = read_state()
-                mv = s['millivolts']
-                mv_txt = f"  \x1b[36m{mv} mV\x1b[0m" if mv is not None else ""
-                print(f"\n  {color(s['percent'])}{s['percent']:3d} %{RESET}  "
-                      f"{bar(s['percent'])}{mv_txt}  {s['status']}\n")
-                print(f"  {DIM}{s['device']} · raw: {s['raw']}{RESET}")
+                state = read_state()
             except (OSError, ValueError, FileNotFoundError) as e:
-                print(f"\n  waiting for dongle… ({e})")
+                err = e
+            if state:
+                name = "Razer " + device_name(state.get("pid"))
+            print(f"{name} — {time.strftime('%H:%M:%S')}  "
+                  f"(poll {interval:g} s, Ctrl-C to quit)")
+            if state:
+                mv = state['millivolts']
+                mv_txt = f"  \x1b[36m{mv} mV\x1b[0m" if mv is not None else ""
+                print(f"\n  {color(state['percent'])}{state['percent']:3d} %{RESET}  "
+                      f"{bar(state['percent'])}{mv_txt}  {state['status']}\n")
+                print(f"  {DIM}{state['device']} · raw: {state['raw']}{RESET}")
+            else:
+                print(f"\n  waiting for dongle… ({err})")
             time.sleep(interval)
     except KeyboardInterrupt:
         print(f"{RESET}\nbye")

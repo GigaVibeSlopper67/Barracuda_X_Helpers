@@ -1,6 +1,6 @@
 [Unit]
-Description=Barracuda X headset battery tray icon
-Comment=StatusNotifierItem tray icon + low-battery notifications for the Razer Barracuda X
+Description=Barracuda headset battery tray icon
+Comment=StatusNotifierItem tray icon + low-battery notifications for the Razer Barracuda (X family / Pro 2.4)
 PartOf=graphical-session.target
 After=graphical-session.target
 

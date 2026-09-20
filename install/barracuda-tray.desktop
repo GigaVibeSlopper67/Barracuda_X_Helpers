@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=Barracuda X Battery Tray
+Name=Barracuda Battery Tray
 GenericName=Battery tray icon
-Comment=Razer Barracuda X headset battery in the system tray (StatusNotifierItem)
+Comment=Razer Barracuda (X family / Pro 2.4) headset battery in the system tray (StatusNotifierItem)
 Exec=barracuda-tray
 Icon=battery
 Terminal=false

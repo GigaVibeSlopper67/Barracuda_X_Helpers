@@ -83,7 +83,7 @@ CLI:
 
 Library:
   from barracuda_battery import read_state
-  s = read_state()                  # -> {'percent', 'millivolts', 'status', 'raw', 'device'}
+  s = read_state()                  # -> {'percent', 'millivolts', 'status', 'raw', 'device', 'pid', 'name'}
 """
 import fcntl
 import glob
@@ -96,6 +96,22 @@ VID = 0x1532
 X_PIDS = (0x0536, 0x0552, 0x0574)         # Barracuda X / X 2.4 / X Chroma
 PRO_PIDS = (0x053A,)                      # Barracuda Pro 2.4
 ALL_PIDS = X_PIDS + PRO_PIDS
+
+# Human-readable product name per dongle PID - the single source of truth for
+# anything that labels a reading (tray, watch, JSON consumers).
+DEVICE_NAMES = {
+    0x0536: "Barracuda X",
+    0x0552: "Barracuda X 2.4",
+    0x0574: "Barracuda X Chroma",
+    0x053A: "Barracuda Pro 2.4",
+}
+
+
+def device_name(pid):
+    """Human-readable product name for a dongle PID ('Barracuda' if unknown)."""
+    return DEVICE_NAMES.get(pid, "Barracuda")
+
+
 IOC = lambda nr, n: 0xC0000000 | (n << 16) | (0x48 << 8) | nr   # HIDIOCSFEATURE(6)/HIDIOCGFEATURE(7)
 QUERY = bytes([0xFF, 0x0A, 0x00, 0xFD, 0x04, 0x12, 0xF1, 0x02, 0x05] + [0] * 55)
 STATUS = {0x00: "idle", 0x03: "discharging", 0x05: "charging", 0x06: "fully charged"}
@@ -133,8 +149,10 @@ def _hidraw_pid(dev):
     return None
 
 
-def _x_read_state(dev):
+def _x_read_state(dev, pid=None):
     """Barracuda X family: 0xFF feature report SET/GET cycle."""
+    if pid is None:
+        pid = _hidraw_pid(dev)
     fd = os.open(dev, os.O_RDWR)
     try:
         fcntl.ioctl(fd, IOC(6, 64), bytearray(QUERY))      # SET_REPORT: arm the query
@@ -154,7 +172,8 @@ def _x_read_state(dev):
         "status": STATUS.get(d[9], f"unknown(0x{d[9]:02x})"),
         "raw": d.hex(" "),
         "device": dev,
-        "pid": None,
+        "pid": pid,
+        "name": device_name(pid),
         "unix_time": time.time(),
     }
 
@@ -385,6 +404,7 @@ def _pro_read_state(dev, console=False):
                     "raw": raw,
                     "device": dev,
                     "pid": 0x053A,
+                    "name": device_name(0x053A),
                     "unix_time": time.time(),
                 }
         raise TimeoutError(
@@ -445,6 +465,7 @@ def _pro_console_probe(dev):
                         "raw": blob.hex(" "),
                         "device": dev,
                         "pid": 0x053A,
+                        "name": device_name(0x053A),
                         "unix_time": time.time(),
                     }
                 if b"is not a valid command" in buf and err_seen_at is None:
@@ -467,9 +488,11 @@ def _pro_console_probe(dev):
 
 
 def read_state(dev=None, console=False):
-    """Query the dongle once. Returns dict with percent / millivolts / status / raw / device.
+    """Query the dongle once. Returns dict with percent / millivolts / status / raw / device / pid / name.
 
-    'millivolts' is None on the Pro (no voltage is exposed on its channel).
+    'millivolts' is None on the Pro (no voltage is exposed on its channel), and
+    'name' is the model label from `device_name()` (e.g. "Barracuda X" vs
+    "Barracuda Pro 2.4") so callers never have to guess the product.
     `console=True` re-enables the Pro's legacy class-02/0x09 probes - only the
     CLI does that (--legacy-console-probes), because they have killed audio."""
     if dev is None:
@@ -484,7 +507,7 @@ def read_state(dev=None, console=False):
         pro = pid in PRO_PIDS
     if pro:
         return _pro_read_state(dev, console)
-    return _x_read_state(dev)
+    return _x_read_state(dev, pid)
 
 
 def _pro_sweep(dev, lo, hi, pace=0.25, dry_run=False, max_fail=3):
