@@ -429,6 +429,14 @@ template: **`docs/barracudapro-runbook.md`**.
 | `./barracuda_battery.py --sweep [LO-HI] [--pace S] [--dry-run]` | class-08 reads, paced 0.25 s, anchor-gated, aborts after 3 silences | safe shape, params unverified |
 | `./barracuda_battery.py --legacy-console-probes` | class-02 console `bat` + class-09 `cmd 04` | **prime suspect for the hangs** |
 
+**Safety note (2026-09-20):** a live *warm-up + full 128-param sweep* (the
+Synapse open sequence — `write d6=2`, `write d6=1`, read link `0x20`, class-0x0e
+poll, read status `0x2a`, read battery `0x21` — followed by a paced read of every
+param `0x00`–`0x7f`) ran without killing audio.  So the "safe surface" is wider
+than reads alone: the class-08 **writes** (`d6`) and the class-`0x0e`/`0x01`
+**status poll** are also safe on Linux, and a full class-08 sweep is fine.  The
+hang trigger remains specific to class-02/0x09, not to "any probing".
+
 Two other fixes in the same pass:
 
 * replies are now attributed by their *own* param field, so an answer that

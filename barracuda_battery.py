@@ -67,6 +67,8 @@ CLI:
   barracuda_battery.py --info        read the version/identifier param (0x00)
   barracuda_battery.py --probe-status
                                     probe the class-0x0e status poll (opt-in)
+  barracuda_battery.py --features
+                                    warm up + read all feature-candidate params
   barracuda_battery.py --legacy-console-probes
                                     send the old class-02/0x09 guesses (can
                                     kill audio until a replug)
@@ -228,6 +230,31 @@ PRO_STATUS = {
     0x00: "discharging",
     0x01: "charging",
 }
+
+# Feature-candidate class-08 read params with best-guess labels.  Discovered by
+# the 2026-09-20 warm-up + full sweep; the distinctive values seen then were
+# 0x12=10, 0x1e=10, 0x33=199, 0x57=13, 0x25=2.  Labels are UNCONFIRMED - toggle
+# each feature in Synapse and diff (--features before/after) to pin them down.
+PRO_FEATURES = [
+    (0x12, "ANC strength (1-10)"),
+    (0x1E, "audio EQ"),
+    (0x16, "EQ 2nd param"),
+    (0x17, "EQ 3rd param"),
+    (0x18, "mic monitor / sidetone"),
+    (0x2C, "power saving on/off"),
+    (0x2D, "power-saving timeout"),
+    (0x56, "toggle (THX / bass?)"),
+    (0x57, "value (mic-NC / timeout?)"),
+    (0x33, "0-255 value (bass?)"),
+    (0x25, "value"),
+    (0x13, "value"),
+    (0x14, "value"),
+    (0x19, "value"),
+    (0x26, "value"),
+    (0x27, "value"),
+    (0x55, "value"),
+    (0x58, "value"),
+]
 
 
 def _pro_read_frame(param):
@@ -663,6 +690,63 @@ def _pro_status_probe(dev, count=4, interval=1.0):
         os.close(fd)
 
 
+def _pro_warmup(fd):
+    """Run Synapse's open sequence to unlock the class-08 settings channel.
+
+    Without this, only the "always-available" params (0x01/0x20/0x21/0x2a)
+    answer a read; the settings params (ANC/EQ/mic-monitor/power-saving/...)
+    stay silent.  This is byte-for-byte what Synapse does on connect: two `d6`
+    writes, a link read, the class-0x0e poll, then status + battery reads.
+    Verified audio-safe 2026-09-20 (see docs/barracudapro.md §9.1)."""
+    os.write(fd, _frame(0x08, bytes([0x04, 0xD6, 0x00, 0x01, 0x02]), arglen=8))
+    time.sleep(0.2)
+    os.write(fd, _frame(0x08, bytes([0x04, 0xD6, 0x00, 0x01, 0x01]), arglen=8))
+    time.sleep(0.2)
+    _pro_query(fd, PRO_ANCHOR_PARAM, 0.5)               # link flag
+    os.write(fd, _frame(0x0E, bytes([0x02, 0xE1, 0x01]), arglen=8))
+    time.sleep(0.3)
+    _pro_query(fd, PRO_STATUS_PARAM, 0.5)               # status
+    _pro_query(fd, PRO_BATTERY_PARAMS[0], 0.5)          # battery
+
+
+def _pro_features(dev):
+    """Warm up the channel, then read every feature-candidate param.
+
+    Prints the confirmed trio (link/status/battery) then each candidate param
+    with its value and best-guess label.  Run it before and after toggling a
+    feature in Synapse and diff the values to confirm the param->feature map."""
+    fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        _pro_drain(fd)
+        _pro_warmup(fd)
+
+        def val(r):
+            return r["value"] if r and r["value"] is not None else None
+
+        link, _ = _pro_query(fd, PRO_ANCHOR_PARAM, 0.5)
+        status, _ = _pro_query(fd, PRO_STATUS_PARAM, 0.5)
+        pct, _ = _pro_query(fd, PRO_BATTERY_PARAMS[0], 0.5)
+
+        sv = val(status)
+        print("link    0x20 = %s" % (val(link) if val(link) is not None else "silent"))
+        print("status  0x2a = %s (%s)"
+              % (sv if sv is not None else "silent",
+                 PRO_STATUS.get(sv, "?") if sv is not None else "silent"))
+        print("battery 0x21 = %s %%" % (val(pct) if val(pct) is not None else "silent"))
+        print()
+        print("feature candidates (labels are best guesses):")
+        for param, label in PRO_FEATURES:
+            reply, _ = _pro_query(fd, param, 0.4)
+            v = val(reply)
+            if v is None:
+                print("  0x%02x  %-28s = (silent)" % (param, label))
+            else:
+                print("  0x%02x  %-28s = %d (0x%02x)" % (param, label, v, v))
+        return 0
+    finally:
+        os.close(fd)
+
+
 def main():
     argv = sys.argv[1:]
     dev = None
@@ -674,6 +758,8 @@ def main():
         sys.exit(_sweep_cli(dev, argv))
     if "--info" in argv:
         sys.exit(_pro_info(_pro_dev(dev)))
+    if "--features" in argv:
+        sys.exit(_pro_features(_pro_dev(dev)))
     if "--probe-status" in argv:
         sys.exit(_pro_status_probe(_pro_dev(dev)))
     if "--watch" in argv:
