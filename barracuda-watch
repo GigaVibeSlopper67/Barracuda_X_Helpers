@@ -43,8 +43,10 @@ def main():
             if state:
                 mv = state['millivolts']
                 mv_txt = f"  \x1b[36m{mv} mV\x1b[0m" if mv is not None else ""
+                link = state.get('link')
+                link_txt = f"  signal {link}" if link is not None else ""
                 print(f"\n  {color(state['percent'])}{state['percent']:3d} %{RESET}  "
-                      f"{bar(state['percent'])}{mv_txt}  {state['status']}\n")
+                      f"{bar(state['percent'])}{mv_txt}{link_txt}  {state['status']}\n")
                 print(f"  {DIM}{state['device']} · raw: {state['raw']}{RESET}")
             else:
                 print(f"\n  waiting for dongle… ({err})")

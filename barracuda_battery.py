@@ -63,7 +63,7 @@ CLI:
                                     look for a class-08 battery param with
                                     Synapse-shaped reads (default 0x00-0x7f)
   barracuda_battery.py --watch [SECONDS]
-                                    live battery/status/voltage (0x33) reads
+                                    live battery/status/link-signal (0x33) reads
   barracuda_battery.py --info        read the version/identifier param (0x00)
   barracuda_battery.py --probe-status
                                     probe the class-0x0e status poll (opt-in)
@@ -83,7 +83,7 @@ CLI:
 
 Library:
   from barracuda_battery import read_state
-  s = read_state()                  # -> {'percent', 'millivolts', 'status', 'raw', 'device', 'pid', 'name'}
+  s = read_state()                  # -> {'percent', 'millivolts', 'link', 'status', 'raw', 'device', 'pid', 'name'}
 """
 import fcntl
 import glob
@@ -249,7 +249,13 @@ PRO_SWEEP_RANGE = (0x00, 0x7F)   # read-side params Synapse's UI talks to
 PRO_BATTERY_PARAMS = (0x21,)     # battery percent - verified vs Synapse UI (0x5d = 93)
 PRO_STATUS_PARAM = 0x2A          # charge-state byte, read right before 0x21
 PRO_VERSION_PARAM = 0x00         # firmware/version string (reply ends "...IN")
-PRO_VOLTAGE_PARAM = 0x33         # candidate battery voltage (value * 20 = mV), unconfirmed
+PRO_SIGNAL_PARAM = 0x33          # link signal strength / RSSI (higher = stronger).
+# 0x33 is NOT battery voltage - the old "(value * 20 = mV)" reading was a
+# coincidence (the raw ~200 x 20 landed in the Li-ion 3.6-4.2 V window).
+# Measured 2026-09-23: ~208-211 with the headset next to the dongle, falling
+# monotonically to ~160 at range edge before the link dropped, recovering back
+# to ~208 on return.  Unchanged by ANC toggles and by plugging in the charger
+# (rules out current/load too).
 # class-08 param 0x2a -> charge state.  0x00 = on battery, 0x01 = charging
 # (verified 2026-09-20 by plugging/unplugging the charger).  A "fully charged"
 # value has not been observed yet - watch for it once it sits at 100 % on the
@@ -266,7 +272,8 @@ PRO_ANC_VALUES = {"off": 0x00, "on": 0x0A, "ambient": 0xFF}
 # the 2026-09-20 warm-up + full sweep.  NOTE: THX/Stereo, Bass Boost, Mic Noise
 # Cancellation and Volume turned out to be *software DSP in Synapse* (the fourth
 # capture shows zero frames for them), so they are NOT here - these are the
-# dongle-side params only.  `0x33` drifts with battery (voltage candidate).
+# dongle-side params only.  `0x33` is the link signal strength / RSSI (higher =
+# stronger), not a battery voltage.
 PRO_FEATURES = [
     (0x12, "ANC mode (0 off / 10 on / 255 ambient)"),
     (0x1E, "audio EQ"),
@@ -277,7 +284,7 @@ PRO_FEATURES = [
     (0x2D, "power-saving timeout"),
     (0x56, "unknown hardware param"),
     (0x57, "unknown hardware param"),
-    (0x33, "dynamic (battery voltage?)"),
+    (0x33, "link signal strength / RSSI (higher = stronger)"),
     (0x25, "unknown"),
     (0x13, "unknown"),
     (0x14, "unknown"),
@@ -388,7 +395,9 @@ def _pro_read_state(dev, console=False):
             return _pro_console_probe(dev)
         _pro_unlock(fd)   # unlock battery/status reads (class-0x0e poll)
         # status (0x2a) first, then percent (0x21) - Synapse's own read order.
+        # Also read 0x33, the link signal strength / RSSI byte (higher = stronger).
         status_reply, _ = _pro_query(fd, PRO_STATUS_PARAM, 0.5)
+        link_reply, _ = _pro_query(fd, PRO_SIGNAL_PARAM, 0.5)
         for param in PRO_BATTERY_PARAMS:
             reply, _ = _pro_query(fd, param, 0.5)
             if reply and reply["value"] is not None and reply["value"] <= 100:
@@ -400,6 +409,7 @@ def _pro_read_state(dev, console=False):
                 return {
                     "percent": reply["value"],
                     "millivolts": None,
+                    "link": link_reply["value"] if link_reply else None,
                     "status": status,
                     "raw": raw,
                     "device": dev,
@@ -488,10 +498,12 @@ def _pro_console_probe(dev):
 
 
 def read_state(dev=None, console=False):
-    """Query the dongle once. Returns dict with percent / millivolts / status / raw / device / pid / name.
+    """Query the dongle once. Returns dict with percent / millivolts / link / status / raw / device / pid / name.
 
-    'millivolts' is None on the Pro (no voltage is exposed on its channel), and
-    'name' is the model label from `device_name()` (e.g. "Barracuda X" vs
+    'millivolts' is None on the Pro (no voltage is exposed on its channel);
+    instead the Pro carries 'link', the 0x33 signal-strength / RSSI byte
+    (higher = stronger, ~208 beside the dongle, ~160 at range edge).  'name'
+    is the model label from `device_name()` (e.g. "Barracuda X" vs
     "Barracuda Pro 2.4") so callers never have to guess the product.
     `console=True` re-enables the Pro's legacy class-02/0x09 probes - only the
     CLI does that (--legacy-console-probes), because they have killed audio."""
@@ -641,19 +653,18 @@ def _pro_watch(dev, interval=5.0, count=None):
         while count is None or n < count:
             st, _ = _pro_query(fd, PRO_STATUS_PARAM, 0.5)
             pct, _ = _pro_query(fd, PRO_BATTERY_PARAMS[0], 0.5)
-            v33, _ = _pro_query(fd, PRO_VOLTAGE_PARAM, 0.5)
+            sig, _ = _pro_query(fd, PRO_SIGNAL_PARAM, 0.5)
             sv = st["value"] if st else None
             pv = pct["value"] if pct else None
-            vv = v33["value"] if v33 else None
+            sg = sig["value"] if sig else None
             status = ("unknown" if sv is None
                       else PRO_STATUS.get(sv, f"0x{sv:02x} (unmapped)"))
-            print("%s  status=%-20s  battery=%s%%   (0x2a=%s 0x21=%s  0x33=%s -> ~%s mV)"
+            print("%s  status=%-20s  battery=%s%%   (0x2a=%s 0x21=%s  link=%s)"
                   % (time.strftime("%H:%M:%S"), status,
                      pv if pv is not None else "-",
                      ("0x%02x" % sv) if sv is not None else "-",
                      ("0x%02x" % pv) if pv is not None else "-",
-                     ("%d" % vv) if vv is not None else "-",
-                     (vv * 20) if vv is not None else "-"))
+                     ("%d" % sg) if sg is not None else "-"))
             n += 1
             if count is not None and n >= count:
                 break

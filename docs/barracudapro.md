@@ -82,6 +82,12 @@ response: 01 80 <len> 50 49 01 c0 <seq2> <ctr2> <data...>   ("PI" = 50 49)
     charging — verified by plug/unplug), version string `0x00` (reply ends
     `...IN`).  These came from the bare-metal capture, not the earlier (wedged)
     sweep.
+  * **link `0x33`** (read) — **link signal strength / RSSI**, *not* a battery
+    voltage (the old "×20 = mV" label was a coincidence).  Measured 2026-09-23:
+    ~208–211 with the headset beside the dongle, falling monotonically to ~160
+    at range edge before the link dropped, recovering back to ~208 on return.
+    Unchanged by ANC toggles and by plugging in the charger, which rules out
+    current/load.  Scale is 0–255-ish, higher = stronger; ~160 = marginal.
   * **Not on USB (software DSP in Synapse)** — THX↔Stereo spatial, Bass Boost,
     Mic Noise Cancellation, and Volume.  Confirmed by the fourth capture
     (2026-09-20): toggling each produced *zero* frames — no class-08 write, no

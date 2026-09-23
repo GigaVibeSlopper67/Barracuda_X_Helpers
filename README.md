@@ -128,7 +128,7 @@ how our probes read (and of a wedged parser after a malformed frame).
 | `0x19` / `0x99` | both | sidetone level (0–15 = `floor(% × 15/100)`) |
 | `0x2c` / `0xac` | both | power-saving timeout (minutes, `0` off) |
 | `0x1e` / `0x96`/`0x97` | both | audio EQ |
-| `0x33` | read | battery voltage candidate (`×20` = mV, unconfirmed) |
+| `0x33` | read | link signal strength / RSSI (higher = stronger; ~208 near dongle, ~160 at range edge) |
 | `0x56` / `0x57` / `0x25` | read | unknown firmware state |
 
 * class `0x08` = Synapse settings channel: read `03 <param> 00 00`, write
@@ -150,7 +150,10 @@ how our probes read (and of a wedged parser after a malformed frame).
   immediately before it, `param 0x2a` is the charge state: `0x00` = on battery,
   `0x01` = charging (verified by plugging/unplugging the charger).  `param 0x00`
   returns a version/identifier string (ends `...IN`).  `read_state()` reads
-  `0x2a` + `0x21` and reports percent + charge state directly.
+  `0x2a` + `0x21` (percent + charge state) and also `0x33`, exposed as the
+  `link` field — a 0–255 signal-strength / RSSI byte (higher = stronger,
+  ~208 beside the dongle, ~160 at range edge) that the tray renders as a
+  signal bar.
 * class `0x02` = line-oriented firmware console.  In its "append mode"
   (observed once) a payload of `\x08\x08\x08` + `bat\r\n` erases the frame
   prefix from the console line buffer and runs the **`bat`** command; the
@@ -191,7 +194,7 @@ how our probes read (and of a wedged parser after a malformed frame).
   ```bash
   ./barracuda_battery.py                          # battery percent + charge state
   ./barracuda_battery.py --features               # read every known param
-  ./barracuda_battery.py --watch [SECONDS]        # live battery/status/voltage
+  ./barracuda_battery.py --watch [SECONDS]        # live battery/status/link-signal
   ./barracuda_battery.py --set-anc off|on|ambient # write ANC mode
   ./barracuda_battery.py --set-sidetone 0-100     # write sidetone level (0 = off)
   ./barracuda_battery.py --set-power-save 0-60    # write power-saving timeout (0 = off)

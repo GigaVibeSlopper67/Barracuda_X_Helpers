@@ -77,7 +77,34 @@ def format_state_text(state):
         return "headset off / state unknown"
     mv = state.get("millivolts")
     mv_txt = f"{mv} mV, " if mv is not None else ""
-    return f"{state['percent']}% ({mv_txt}{state['status']})"
+    text = f"{state['percent']}% ({mv_txt}{state['status']})"
+    link = state.get("link")
+    if link is not None:
+        bars, label = signal_bars(link)
+        text += f"  ·  {'●' * bars + '○' * (4 - bars)} {label} ({link})"
+    return text
+
+
+# Signal strength (Barracuda Pro 2.4 only).  read_state()['link'] is the raw
+# 0x33 link-quality byte (higher = stronger): ~208-211 beside the dongle,
+# ~160 at range edge, and the link drops below ~160.  The X family exposes no
+# link byte, so this only renders for the Pro.
+SIGNAL_STRONG = 200
+SIGNAL_GOOD = 175
+SIGNAL_WEAK = 160
+
+
+def signal_bars(link):
+    """(bars 0-4, label) for a raw 0x33 link byte, or (None, None) if absent."""
+    if link is None:
+        return None, None
+    if link >= SIGNAL_STRONG:
+        return 4, "strong"
+    if link >= SIGNAL_GOOD:
+        return 3, "good"
+    if link >= SIGNAL_WEAK:
+        return 2, "weak"
+    return 1, "critical"
 
 
 def icon_candidates(state):
@@ -355,6 +382,20 @@ def selftest():
         assert icon_candidates(s), f"icon_candidates({s!r}) empty"
     assert format_state_text(None) == "dongle not found"
     assert format_state_text(empty) == "headset off / state unknown"
+
+    # Signal strength (Pro 2.4): bars/labels from the raw 0x33 link byte.
+    assert signal_bars(None) == (None, None)
+    assert signal_bars(208) == (4, "strong")
+    assert signal_bars(190) == (3, "good")
+    assert signal_bars(170) == (2, "weak")
+    assert signal_bars(150) == (1, "critical")
+    pro_state = {"percent": 56, "millivolts": None, "status": "discharging",
+                 "link": 208, "pid": 0x053A, "name": "Barracuda Pro 2.4"}
+    assert "strong (208)" in format_state_text(pro_state)
+    # X family: no link byte -> no signal segment.
+    x_state = {"percent": 80, "millivolts": 4128, "status": "charging",
+               "pid": 0x0536, "name": "Barracuda X"}
+    assert "signal" not in format_state_text(x_state)
 
     # Model labelling: a detected Pro must never be reported as an X.
     assert device_name(0x053A) == "Barracuda Pro 2.4"
