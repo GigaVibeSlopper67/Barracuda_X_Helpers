@@ -107,6 +107,27 @@ def signal_bars(link):
     return 1, "critical"
 
 
+# Read-only settings params the tray mirrors (Pro 2.4 only).  The X family's
+# 0xFF feature report carries no ANC / sidetone / power-saving, so `read_state`
+# only returns these keys for the Pro; `format_settings` returns [] for anything
+# else and the tray hides the rows.
+SETTINGS_ROWS = (("anc", "ANC"), ("sidetone", "Sidetone"), ("power_save", "Power saving"))
+
+
+def format_settings(state):
+    """[(name, value)] rows for the Pro settings params, or [] when absent.
+
+    Values are the human strings from read_state()["anc"/"sidetone"/"power_save"],
+    or "unknown" when a param is present but silent (None)."""
+    if not isinstance(state, dict) or "anc" not in state:
+        return []
+    out = []
+    for key, name in SETTINGS_ROWS:
+        v = state.get(key)
+        out.append((name, v if v is not None else "unknown"))
+    return out
+
+
 def icon_candidates(state):
     """Theme icon names to try in order; empty list -> painted fallback."""
     kind = state_kind(state)
@@ -212,6 +233,14 @@ class TrayApp:
 
         self.a_status = QAction(format_state_text(None))
         self.a_status.setEnabled(False)
+        # Read-only settings rows (ANC / sidetone / power saving), hidden until a
+        # Pro reports them; no action is wired to any of them (display only).
+        self.settings_actions = []
+        for _key, name in SETTINGS_ROWS:
+            a = QAction(f"{name}: …")
+            a.setEnabled(False)
+            a.setVisible(False)
+            self.settings_actions.append(a)
         self.a_refresh = QAction("Refresh now")
         self.a_refresh.triggered.connect(self.tick)
         self.a_watch = QAction("Watch live in Konsole…")
@@ -225,10 +254,10 @@ class TrayApp:
         a_quit.triggered.connect(QApplication.quit)
 
         self.menu = QMenu()
-        for a in (self.a_status, self.a_refresh, self.a_watch, self.a_notify,
-                  self.a_about, a_quit):
+        for a in (self.a_status, *self.settings_actions, self.a_refresh,
+                  self.a_watch, self.a_notify, self.a_about, a_quit):
             self.menu.addAction(a)
-            if a in (self.a_watch, self.a_about):
+            if a in (self.settings_actions[-1], self.a_watch, self.a_about):
                 self.menu.addSeparator()
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self.on_activated)
@@ -255,11 +284,22 @@ class TrayApp:
         self.a_status.setText(f"{self.name} — {text}")
         self.tray.setToolTip(f"{self.name} — {text}")
         self.tray.setIcon(self.icon_for(state))
+        self.update_settings(state)
+
+    def update_settings(self, state):
+        """Refresh the read-only ANC / sidetone / power-saving rows (Pro only)."""
+        rows = format_settings(state)
+        for action, row in zip(self.settings_actions, rows):
+            name, value = row
+            action.setText(f"{name}: {value}")
+            action.setVisible(True)
+        for action in self.settings_actions[len(rows):]:
+            action.setVisible(False)
 
     def tick(self):
         state, err = None, None
         try:
-            state = read_state(self.dev)
+            state = read_state(self.dev, settings=True)
         except FileNotFoundError:
             err = "dongle not found"
         except (OSError, ValueError) as e:
@@ -396,6 +436,17 @@ def selftest():
     x_state = {"percent": 80, "millivolts": 4128, "status": "charging",
                "pid": 0x0536, "name": "Barracuda X"}
     assert "signal" not in format_state_text(x_state)
+
+    # Read-only settings rows: Pro reports them, X family / unknown state hide them.
+    assert format_settings(x_state) == []                       # X: no settings keys
+    assert format_settings(None) == []
+    assert format_settings({"percent": 80, "status": "charging"}) == []
+    pro_settings = {"anc": "on", "sidetone": "on (47%)", "power_save": "15 min"}
+    assert format_settings({**pro_state, **pro_settings}) == [
+        ("ANC", "on"), ("Sidetone", "on (47%)"), ("Power saving", "15 min")]
+    assert format_settings({**pro_state, "anc": None, "sidetone": "off",
+                            "power_save": "off"}) == [
+        ("ANC", "unknown"), ("Sidetone", "off"), ("Power saving", "off")]
 
     # Model labelling: a detected Pro must never be reported as an X.
     assert device_name(0x053A) == "Barracuda Pro 2.4"

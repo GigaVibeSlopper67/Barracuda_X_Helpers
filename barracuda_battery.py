@@ -267,6 +267,7 @@ PRO_STATUS = {
 
 # class-08 param 0x12 (ANC mode) values - all three confirmed by toggling.
 PRO_ANC_VALUES = {"off": 0x00, "on": 0x0A, "ambient": 0xFF}
+PRO_ANC_MODE = {v: k for k, v in PRO_ANC_VALUES.items()}  # value -> label (for reads)
 
 # Feature-candidate class-08 read params with best-guess labels.  Discovered by
 # the 2026-09-20 warm-up + full sweep.  NOTE: THX/Stereo, Bass Boost, Mic Noise
@@ -363,7 +364,7 @@ def _record(seen, buf):
             seen.setdefault(f["param"], f)
 
 
-def _pro_read_state(dev, console=False):
+def _pro_read_state(dev, console=False, settings=False):
     """Barracuda Pro: read state over the Synapse-verified class-08 channel.
 
     Safety rules (docs/barracudapro.md §7, §8) - all learned the hard way:
@@ -406,7 +407,7 @@ def _pro_read_state(dev, console=False):
                           else PRO_STATUS.get(st, f"0x{st:02x} (unmapped)"))
                 raw = (status_reply["data"] if status_reply else b"").hex(" ")
                 raw += " | " + reply["data"].hex(" ")
-                return {
+                state = {
                     "percent": reply["value"],
                     "millivolts": None,
                     "link": link_reply["value"] if link_reply else None,
@@ -417,6 +418,9 @@ def _pro_read_state(dev, console=False):
                     "name": device_name(0x053A),
                     "unix_time": time.time(),
                 }
+                if settings:
+                    state.update(_pro_read_settings(fd))
+                return state
         raise TimeoutError(
             f"{dev}: class-08 battery read (param 0x21) did not answer "
             f"(link flag 0x20 = {anchor['data'].hex(' ')}) - replug and re-run; "
@@ -497,7 +501,7 @@ def _pro_console_probe(dev):
         os.close(fd)
 
 
-def read_state(dev=None, console=False):
+def read_state(dev=None, console=False, settings=False):
     """Query the dongle once. Returns dict with percent / millivolts / link / status / raw / device / pid / name.
 
     'millivolts' is None on the Pro (no voltage is exposed on its channel);
@@ -506,7 +510,12 @@ def read_state(dev=None, console=False):
     is the model label from `device_name()` (e.g. "Barracuda X" vs
     "Barracuda Pro 2.4") so callers never have to guess the product.
     `console=True` re-enables the Pro's legacy class-02/0x09 probes - only the
-    CLI does that (--legacy-console-probes), because they have killed audio."""
+    CLI does that (--legacy-console-probes), because they have killed audio.
+    `settings=True` (Pro only) additionally reads the read-only feature params
+    (ANC / sidetone / power-saving) and returns them as `anc` / `sidetone` /
+    `power_save` strings (None when the param is silent or absent).  It costs
+    an extra `_pro_warmup()` + a few reads, so it is off by default to keep
+    `--watch` / `--json` fast; the tray opts in."""
     if dev is None:
         dev, pid = find_hidraw()
         if dev is None:
@@ -518,7 +527,7 @@ def read_state(dev=None, console=False):
             raise FileNotFoundError(f"cannot read uevent for {dev}")
         pro = pid in PRO_PIDS
     if pro:
-        return _pro_read_state(dev, console)
+        return _pro_read_state(dev, console, settings)
     return _x_read_state(dev, pid)
 
 
@@ -772,6 +781,46 @@ def _pro_warmup(fd):
     time.sleep(0.3)
     _pro_query(fd, PRO_STATUS_PARAM, 0.5)               # status
     _pro_query(fd, PRO_BATTERY_PARAMS[0], 0.5)          # battery
+
+
+def _sidetone_text(on, level):
+    """Human sidetone string from 0x18 (on/off) + 0x19 (0-15 level) values.
+
+    `None` values mean the param stayed silent; a None/None pair reports None.
+    The 0-15 level maps back to Synapse's 0-100 % via `level * 100 // 15`."""
+    if on == 0:
+        return "off"
+    if level is not None:
+        return f"on ({level * 100 // 15}%)"
+    if on == 1:
+        return "on"
+    return None
+
+
+def _pro_read_settings(fd):
+    """Read the read-only feature params (ANC / sidetone / power-saving).
+
+    Requires the class-08 settings channel to be unlocked, so it runs
+    `_pro_warmup()` first (Synapse's own open sequence, verified audio-safe).
+    Each param is read best-effort: silence (ANC 0x12 is documented flaky, and
+    a param can legitimately be absent) yields None rather than an error, so a
+    missing feature never breaks the battery read.  Returns a dict of
+    {"anc", "sidetone", "power_save"} strings (or None per missing param)."""
+
+    def val(param):
+        r, _ = _pro_query(fd, param, 0.4)
+        return r["value"] if r and r["value"] is not None else None
+
+    _pro_warmup(fd)
+    anc = val(0x12)
+    on = val(0x18)
+    level = val(0x19)
+    power = val(0x2C)
+    return {
+        "anc": PRO_ANC_MODE.get(anc) if anc is not None else None,
+        "sidetone": _sidetone_text(on, level),
+        "power_save": None if power is None else ("off" if power == 0 else f"{power} min"),
+    }
 
 
 def _pro_features(dev):

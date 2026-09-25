@@ -303,9 +303,11 @@ cp install/barracuda-tray.service ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now barracuda-tray
 ```
 
-Tray menu: current state (read-only), *Refresh now*, *Watch live in Konsole…*
-(runs `barracuda-watch`), *Notifications* toggle, *About*, *Quit*. A single
-click posts the current state as a transient notification.
+Tray menu: current state (read-only), then — on the Barracuda Pro 2.4 — read-only
+*ANC* / *Sidetone* / *Power saving* status rows (display only, no way to change
+them from the tray), *Refresh now*, *Watch live in Konsole…* (runs
+`barracuda-watch`), *Notifications* toggle, *About*, *Quit*. A single click posts
+the current state as a transient notification.
 
 ## Sources
 
